@@ -9,6 +9,7 @@ import os
 import time
 import torch
 
+
 def get_machine_local_and_dist_rank():
     """
     Get the distributed and local rank of the current gpu.

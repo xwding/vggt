@@ -18,7 +18,6 @@ import numpy as np
 from data.dataset_util import *
 from data.base_dataset import BaseDataset
 
-
 SEEN_CATEGORIES = [
     "apple",
     "backpack",
@@ -115,8 +114,7 @@ class Co3dDataset(BaseDataset):
         else:
             raise ValueError(f"Invalid split: {split}")
 
-        self.invalid_sequence = [] # set any invalid sequence names here
-
+        self.invalid_sequence = []  # set any invalid sequence names here
 
         self.category_map = {}
         self.data_store = {}
@@ -132,9 +130,7 @@ class Co3dDataset(BaseDataset):
 
         for c in category:
             for split_name in split_name_list:
-                annotation_file = osp.join(
-                    self.CO3D_ANNOTATION_DIR, f"{c}_{split_name}.jgz"
-                )
+                annotation_file = osp.join(self.CO3D_ANNOTATION_DIR, f"{c}_{split_name}.jgz")
 
                 try:
                     with gzip.open(annotation_file, "r") as fin:
@@ -182,16 +178,14 @@ class Co3dDataset(BaseDataset):
         """
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
-            
+
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
 
         metadata = self.data_store[seq_name]
 
         if ids is None:
-            ids = np.random.choice(
-                len(metadata), img_per_seq, replace=self.allow_duplicate_img
-            )
+            ids = np.random.choice(len(metadata), img_per_seq, replace=self.allow_duplicate_img)
 
         annos = [metadata[i] for i in ids]
 
@@ -217,15 +211,11 @@ class Co3dDataset(BaseDataset):
                 depth_path = image_path.replace("/images", "/depths") + ".geometric.png"
                 depth_map = read_depth(depth_path, 1.0)
 
-                mvs_mask_path = image_path.replace(
-                    "/images", "/depth_masks"
-                ).replace(".jpg", ".png")
+                mvs_mask_path = image_path.replace("/images", "/depth_masks").replace(".jpg", ".png")
                 mvs_mask = cv2.imread(mvs_mask_path, cv2.IMREAD_GRAYSCALE) > 128
                 depth_map[~mvs_mask] = 0
 
-                depth_map = threshold_depth_map(
-                    depth_map, min_percentile=-1, max_percentile=98
-                )
+                depth_map = threshold_depth_map(depth_map, min_percentile=-1, max_percentile=98)
             else:
                 depth_map = None
 

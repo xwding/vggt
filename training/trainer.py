@@ -6,7 +6,6 @@
 
 import os
 
-
 # --- Environment Variable Setup for Performance and Debugging ---
 # Helps with memory fragmentation in PyTorch's memory allocator.
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -120,7 +119,7 @@ class Trainer:
         self.limit_train_batches = limit_train_batches
         self.limit_val_batches = limit_val_batches
         self.seed_value = seed_value
-        
+
         # 'where' tracks training progress from 0.0 to 1.0 for schedulers
         self.where = 0.0
 
@@ -156,14 +155,14 @@ class Trainer:
         # Load checkpoint if available or specified
         if self.checkpoint_conf.resume_checkpoint_path is not None:
             self._load_resuming_checkpoint(self.checkpoint_conf.resume_checkpoint_path)
-        else:   
+        else:
             ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
             if ckpt_path is not None:
                 self._load_resuming_checkpoint(ckpt_path)
 
         # Wrap the model with DDP
         self._setup_ddp_distributed_training(distributed, device)
-        
+
         # Barrier to ensure all processes are synchronized before starting
         dist.barrier()
 
@@ -190,8 +189,7 @@ class Trainer:
 
         # Initialize the DDP process group
         dist.init_process_group(
-            backend=distributed_conf.backend,
-            timeout=timedelta(minutes=distributed_conf.timeout_mins)
+            backend=distributed_conf.backend, timeout=timedelta(minutes=distributed_conf.timeout_mins)
         )
         self.rank = dist.get_rank()
 
@@ -201,14 +199,14 @@ class Trainer:
 
         with g_pathmgr.open(ckpt_path, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
-        
+
         # Load model state
         model_state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
-        missing, unexpected = self.model.load_state_dict(
-            model_state_dict, strict=self.checkpoint_conf.strict
-        )
+        missing, unexpected = self.model.load_state_dict(model_state_dict, strict=self.checkpoint_conf.strict)
         if self.rank == 0:
-            logging.info(f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}.")
+            logging.info(
+                f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}."
+            )
 
         # Load optimizer state if available and in training mode
         if "optimizer" in checkpoint:
@@ -276,9 +274,7 @@ class Trainer:
         self.val_dataset = None
 
         if self.mode in ["train", "val"]:
-            self.val_dataset = instantiate(
-                self.data_conf.get('val', None), _recursive_=False
-            )
+            self.val_dataset = instantiate(self.data_conf.get('val', None), _recursive_=False)
             if self.val_dataset is not None:
                 self.val_dataset.seed = self.seed_value
 
@@ -329,7 +325,7 @@ class Trainer:
             "time_elapsed": self.time_elapsed_meter.val,
             "optimizer": [optim.optimizer.state_dict() for optim in self.optims],
         }
-        
+
         if len(self.optims) == 1:
             checkpoint_content["optimizer"] = checkpoint_content["optimizer"][0]
         if self.optim_conf.amp.enabled:
@@ -348,13 +344,10 @@ class Trainer:
 
         saver.save_checkpoint(
             model=model,
-            ema_models = None,
+            ema_models=None,
             skip_saving_parameters=[],
             **checkpoint_content,
         )
-
-
-
 
     def _get_scalar_log_keys(self, phase: str) -> List[str]:
         """Retrieves keys for scalar values to be logged for a given phase."""
@@ -378,10 +371,10 @@ class Trainer:
         """Runs the main training loop over all epochs."""
         while self.epoch < self.max_epochs:
             set_seeds(self.seed_value + self.epoch * 100, self.max_epochs, self.distributed_rank)
-            
+
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
             self.train_epoch(dataloader)
-            
+
             # Save checkpoint after each training epoch
             self.save_checkpoint(self.epoch)
 
@@ -395,9 +388,9 @@ class Trainer:
             # Skips validation after the last training epoch, as it can be run separately.
             if self.epoch % self.val_epoch_freq == 0 and self.epoch < self.max_epochs - 1:
                 self.run_val()
-            
+
             self.epoch += 1
-        
+
         self.epoch -= 1
 
     def run_val(self):
@@ -408,12 +401,11 @@ class Trainer:
 
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
         self.val_epoch(dataloader)
-        
+
         del dataloader
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-
 
     @torch.no_grad()
     def val_epoch(self, val_loader):
@@ -422,13 +414,11 @@ class Trainer:
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
         data_times = []
         phase = 'val'
-        
+
         loss_names = self._get_scalar_log_keys(phase)
         loss_names = [f"Loss/{phase}_{name}" for name in loss_names]
-        loss_meters = {
-            name: AverageMeter(name, self.device, ":.4f") for name in loss_names
-        }
-        
+        loss_meters = {name: AverageMeter(name, self.device, ":.4f") for name in loss_names}
+
         progress = ProgressMeter(
             num_batches=len(val_loader),
             meters=[
@@ -446,20 +436,16 @@ class Trainer:
         end = time.time()
 
         iters_per_epoch = len(val_loader)
-        limit_val_batches = (
-            iters_per_epoch
-            if self.limit_val_batches is None
-            else self.limit_val_batches
-        )
+        limit_val_batches = iters_per_epoch if self.limit_val_batches is None else self.limit_val_batches
 
         for data_iter, batch in enumerate(val_loader):
             if data_iter > limit_val_batches:
                 break
-            
+
             # measure data loading time
             data_time.update(time.time() - end)
             data_times.append(data_time.val)
-            
+
             with torch.cuda.amp.autocast(enabled=False):
                 batch = self._process_batch(batch)
             batch = copy_data_to_device(batch, self.device, non_blocking=True)
@@ -470,24 +456,20 @@ class Trainer:
                 amp_type = torch.bfloat16
             else:
                 amp_type = torch.float16
-            
+
             # compute output
             with torch.no_grad():
                 with torch.cuda.amp.autocast(
                     enabled=self.optim_conf.amp.enabled,
                     dtype=amp_type,
                 ):
-                    val_loss_dict = self._step(
-                        batch, self.model, phase, loss_meters
-                    )
+                    val_loss_dict = self._step(batch, self.model, phase, loss_meters)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
 
-            self.time_elapsed_meter.update(
-                time.time() - self.start_time + self.ckpt_time_elapsed
-            )
+            self.time_elapsed_meter.update(time.time() - self.start_time + self.ckpt_time_elapsed)
 
             if torch.cuda.is_available():
                 mem.update(torch.cuda.max_memory_allocated() // 1e9)
@@ -495,26 +477,22 @@ class Trainer:
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
-
         return True
 
-    def train_epoch(self, train_loader):        
+    def train_epoch(self, train_loader):
         batch_time = AverageMeter("Batch Time", self.device, ":.4f")
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
         data_times = []
         phase = 'train'
-        
+
         loss_names = self._get_scalar_log_keys(phase)
         loss_names = [f"Loss/{phase}_{name}" for name in loss_names]
-        loss_meters = {
-            name: AverageMeter(name, self.device, ":.4f") for name in loss_names
-        }
-        
-        for config in self.gradient_clipper.configs: 
+        loss_meters = {name: AverageMeter(name, self.device, ":.4f") for name in loss_names}
+
+        for config in self.gradient_clipper.configs:
             param_names = ",".join(config['module_names'])
             loss_meters[f"Grad/{param_names}"] = AverageMeter(f"Grad/{param_names}", self.device, ":.4f")
-
 
         progress = ProgressMeter(
             num_batches=len(train_loader),
@@ -533,12 +511,8 @@ class Trainer:
         end = time.time()
 
         iters_per_epoch = len(train_loader)
-        limit_train_batches = (
-            iters_per_epoch
-            if self.limit_train_batches is None
-            else self.limit_train_batches
-        )
-        
+        limit_train_batches = iters_per_epoch if self.limit_train_batches is None else self.limit_train_batches
+
         if self.gradient_clipper is not None:
             # setup gradient clipping at the beginning of training
             self.gradient_clipper.setup_clipping(self.model)
@@ -546,12 +520,11 @@ class Trainer:
         for data_iter, batch in enumerate(train_loader):
             if data_iter > limit_train_batches:
                 break
-            
+
             # measure data loading time
             data_time.update(time.time() - end)
             data_times.append(data_time.val)
 
-            
             with torch.cuda.amp.autocast(enabled=False):
                 batch = self._process_batch(batch)
 
@@ -559,20 +532,18 @@ class Trainer:
 
             accum_steps = self.accum_steps
 
-            if accum_steps==1:
+            if accum_steps == 1:
                 chunked_batches = [batch]
             else:
                 chunked_batches = chunk_batch_for_accum_steps(batch, accum_steps)
 
-            self._run_steps_on_batch_chunks(
-                chunked_batches, phase, loss_meters
-            )
+            self._run_steps_on_batch_chunks(chunked_batches, phase, loss_meters)
 
             # compute gradient and do SGD step
             assert data_iter <= limit_train_batches  # allow for off by one errors
             exact_epoch = self.epoch + float(data_iter) / limit_train_batches
             self.where = float(exact_epoch) / self.max_epochs
-            
+
             assert self.where <= 1 + self.EPSILON
             if self.where < 1.0:
                 for optim in self.optims:
@@ -581,7 +552,7 @@ class Trainer:
                 logging.warning(
                     f"Skipping scheduler update since the training is at the end, i.e, {self.where} of [0,1]."
                 )
-                    
+
             # Log schedulers
             if self.steps[phase] % self.logging_conf.log_freq == 0:
                 for i, optim in enumerate(self.optims):
@@ -590,11 +561,7 @@ class Trainer:
                             optim_prefix = (
                                 f"{i}_"
                                 if len(self.optims) > 1
-                                else (
-                                    "" + f"{j}_"
-                                    if len(optim.optimizer.param_groups) > 1
-                                    else ""
-                                )
+                                else ("" + f"{j}_" if len(optim.optimizer.param_groups) > 1 else "")
                             )
                             self.tb_writer.log(
                                 os.path.join("Optim", f"{optim_prefix}", option),
@@ -618,16 +585,14 @@ class Trainer:
                     loss_meters[f"Grad/{key}"].update(grad_norm)
 
             # Optimizer step
-            for optim in self.optims:   
+            for optim in self.optims:
                 self.scaler.step(optim.optimizer)
             self.scaler.update()
 
             # Measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-            self.time_elapsed_meter.update(
-                time.time() - self.start_time + self.ckpt_time_elapsed
-            )
+            self.time_elapsed_meter.update(time.time() - self.start_time + self.ckpt_time_elapsed)
             mem.update(torch.cuda.max_memory_allocated() // 1e9)
 
             if data_iter % self.logging_conf.log_freq == 0:
@@ -644,9 +609,9 @@ class Trainer:
         """
         Run the forward / backward as many times as there are chunks in the batch,
         accumulating the gradients on each backward
-        """        
-        
-        for optim in self.optims:   
+        """
+
+        for optim in self.optims:
             optim.zero_grad(set_to_none=True)
 
         accum_steps = len(chunked_batches)
@@ -657,23 +622,16 @@ class Trainer:
             amp_type = torch.bfloat16
         else:
             amp_type = torch.float16
-        
+
         for i, chunked_batch in enumerate(chunked_batches):
-            ddp_context = (
-                self.model.no_sync()
-                if i < accum_steps - 1
-                else contextlib.nullcontext()
-            )
+            ddp_context = self.model.no_sync() if i < accum_steps - 1 else contextlib.nullcontext()
 
             with ddp_context:
                 with torch.cuda.amp.autocast(
                     enabled=self.optim_conf.amp.enabled,
                     dtype=amp_type,
                 ):
-                    loss_dict = self._step(
-                        chunked_batch, self.model, phase, loss_meters
-                    )
-
+                    loss_dict = self._step(chunked_batch, self.model, phase, loss_meters)
 
                 loss = loss_dict["objective"]
                 loss_key = f"Loss/{phase}_loss_objective"
@@ -688,37 +646,39 @@ class Trainer:
                 self.scaler.scale(loss).backward()
                 loss_meters[loss_key].update(loss.item(), batch_size)
 
-
     def _apply_batch_repetition(self, batch: Mapping) -> Mapping:
         """
         Applies a data augmentation by concatenating the original batch with a
         flipped version of itself.
         """
         tensor_keys = [
-            "images", "depths", "extrinsics", "intrinsics", 
-            "cam_points", "world_points", "point_masks", 
-        ]        
+            "images",
+            "depths",
+            "extrinsics",
+            "intrinsics",
+            "cam_points",
+            "world_points",
+            "point_masks",
+        ]
         string_keys = ["seq_name"]
-        
+
         for key in tensor_keys:
             if key in batch:
                 original_tensor = batch[key]
-                batch[key] = torch.concatenate([original_tensor, 
-                                                torch.flip(original_tensor, dims=[1])], 
-                                                dim=0)
-        
+                batch[key] = torch.concatenate([original_tensor, torch.flip(original_tensor, dims=[1])], dim=0)
+
         for key in string_keys:
             if key in batch:
                 batch[key] = batch[key] * 2
-        
+
         return batch
 
-    def _process_batch(self, batch: Mapping):      
+    def _process_batch(self, batch: Mapping):
         if self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
-        
+
         # Normalize camera extrinsics and points. The function returns new tensors.
-        normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = \
+        normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = (
             normalize_camera_extrinsics_and_points_batch(
                 extrinsics=batch["extrinsics"],
                 cam_points=batch["cam_points"],
@@ -726,6 +686,7 @@ class Trainer:
                 depths=batch["depths"],
                 point_masks=batch["point_masks"],
             )
+        )
 
         # Replace the original values in the batch with the normalized ones.
         batch["extrinsics"] = normalized_extrinsics
@@ -738,16 +699,16 @@ class Trainer:
     def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict):
         """
         Performs a single forward pass, computes loss, and logs results.
-        
+
         Returns:
             A dictionary containing the computed losses.
         """
         # Forward pass
         y_hat = model(images=batch["images"])
-        
+
         # Loss computation
         loss_dict = self.loss(y_hat, batch)
-        
+
         # Combine all data for logging
         log_data = {**y_hat, **loss_dict, **batch}
 
@@ -761,7 +722,7 @@ class Trainer:
         """Updates average meters and logs scalar values to TensorBoard."""
         keys_to_log = self._get_scalar_log_keys(phase)
         batch_size = data['extrinsics'].shape[0]
-        
+
         for key in keys_to_log:
             if key in data:
                 value = data[key].item() if torch.is_tensor(data[key]) else data[key]
@@ -781,15 +742,9 @@ class Trainer:
             return
 
         if phase in self.logging_conf.visuals_keys_to_log:
-            keys_to_log = self.logging_conf.visuals_keys_to_log[phase][
-                "keys_to_log"
-            ]
-            assert (
-                len(keys_to_log) > 0
-            ), "Need to include some visual keys to log"
-            modality = self.logging_conf.visuals_keys_to_log[phase][
-                "modality"
-            ]
+            keys_to_log = self.logging_conf.visuals_keys_to_log[phase]["keys_to_log"]
+            assert len(keys_to_log) > 0, "Need to include some visual keys to log"
+            modality = self.logging_conf.visuals_keys_to_log[phase]["modality"]
             assert modality in [
                 "image",
                 "video",
@@ -803,7 +758,8 @@ class Trainer:
                         batch[key][0],  # Ensure batch[key][0] is tensor and has at least 3 dimensions
                         nrow=self.logging_conf.visuals_per_batch_to_log,
                     )
-                    for key in keys_to_log if key in batch and batch[key][0].dim() >= 3
+                    for key in keys_to_log
+                    if key in batch and batch[key][0].dim() >= 3
                 ],
                 nrow=1,
             ).clamp(-1, 1)
@@ -813,11 +769,7 @@ class Trainer:
                 visuals_to_log = visuals_to_log.to(torch.float16)
             visuals_to_log = visuals_to_log.numpy()
 
-            self.tb_writer.log_visuals(
-                name, visuals_to_log, step, self.logging_conf.video_logging_fps
-            )
-
-
+            self.tb_writer.log_visuals(name, visuals_to_log, step, self.logging_conf.video_logging_fps)
 
 
 def chunk_batch_for_accum_steps(batch: Mapping, accum_steps: int) -> List[Mapping]:
@@ -825,6 +777,7 @@ def chunk_batch_for_accum_steps(batch: Mapping, accum_steps: int) -> List[Mappin
     if accum_steps == 1:
         return [batch]
     return [get_chunk_from_data(batch, i, accum_steps) for i in range(accum_steps)]
+
 
 def is_sequence_of_primitives(data: Any) -> bool:
     """Checks if data is a sequence of primitive types (str, int, float, bool)."""
@@ -834,6 +787,7 @@ def is_sequence_of_primitives(data: Any) -> bool:
         and len(data) > 0
         and isinstance(data[0], (str, int, float, bool))
     )
+
 
 def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
     """
@@ -854,10 +808,7 @@ def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
         end = (len(data) // num_chunks) * (chunk_id + 1)
         return data[start:end]
     elif isinstance(data, Mapping):
-        return {
-            key: get_chunk_from_data(value, chunk_id, num_chunks)
-            for key, value in data.items()
-        }
+        return {key: get_chunk_from_data(value, chunk_id, num_chunks) for key, value in data.items()}
     elif isinstance(data, str):
         # NOTE: this is a hack to support string keys in the batch
         return data
@@ -865,4 +816,3 @@ def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
         return [get_chunk_from_data(value, chunk_id, num_chunks) for value in data]
     else:
         return data
-

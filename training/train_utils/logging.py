@@ -26,7 +26,6 @@ def _cached_log_stream(filename):
     return io
 
 
-
 def setup_logging(
     name,
     output_dir=None,

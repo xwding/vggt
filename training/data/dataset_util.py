@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 import math
 import numpy as np
 from PIL import Image
 import PIL
+
 try:
     lanczos = PIL.Image.Resampling.LANCZOS
     bicubic = PIL.Image.Resampling.BICUBIC
@@ -21,15 +23,14 @@ except AttributeError:
 from vggt.utils.geometry import closed_form_inverse_se3
 
 
-
 #####################################################################################################################
 def crop_image_depth_and_intrinsic_by_pp(
     image, depth_map, intrinsic, target_shape, track=None, filepath=None, strict=False
 ):
     """
     TODO: some names of width and height seem not consistent. Need to check.
-    
-    
+
+
     Crops the given image and depth map around the camera's principal point, as defined by `intrinsic`.
     Specifically:
       - Ensures that the crop is centered on (cx, cy).
@@ -72,23 +73,21 @@ def crop_image_depth_and_intrinsic_by_pp(
 
     if original_size[0] < target_shape[0]:
         error_message = (
-            f"Width check failed: original width {original_size[0]} "
-            f"is less than target width {target_shape[0]}."
+            f"Width check failed: original width {original_size[0]} " f"is less than target width {target_shape[0]}."
         )
         print(error_message)
         raise AssertionError(error_message)
 
     if original_size[1] < target_shape[1]:
         error_message = (
-            f"Height check failed: original height {original_size[1]} "
-            f"is less than target height {target_shape[1]}."
+            f"Height check failed: original height {original_size[1]} " f"is less than target height {target_shape[1]}."
         )
         print(error_message)
         raise AssertionError(error_message)
 
     # Identify principal point (cx, cy) from intrinsic
-    cx = (intrinsic[1, 2])
-    cy = (intrinsic[0, 2])
+    cx = intrinsic[1, 2]
+    cy = intrinsic[0, 2]
 
     # Compute how far we can crop in each direction
     if strict:
@@ -298,12 +297,8 @@ def threshold_depth_map(
         depth_map[depth_map > max_depth] = 0.0
 
     # Percentile-based thresholds
-    depth_max_thres = (
-        np.nanpercentile(depth_map, max_percentile) if max_percentile > 0 else None
-    )
-    depth_min_thres = (
-        np.nanpercentile(depth_map, min_percentile) if min_percentile > 0 else None
-    )
+    depth_max_thres = np.nanpercentile(depth_map, max_percentile) if max_percentile > 0 else None
+    depth_min_thres = np.nanpercentile(depth_map, min_percentile) if min_percentile > 0 else None
 
     # Apply the thresholds if they are > 0
     if depth_max_thres is not None and depth_max_thres > 0:
@@ -358,17 +353,13 @@ def depth_to_world_coords_points(
     t_cam_to_world = cam_to_world_extrinsic[:3, 3]
 
     # Apply the rotation and translation to the camera coordinates
-    world_coords_points = (
-        np.dot(cam_coords_points, R_cam_to_world.T) + t_cam_to_world
-    ) # HxWx3, 3x3 -> HxWx3
+    world_coords_points = np.dot(cam_coords_points, R_cam_to_world.T) + t_cam_to_world  # HxWx3, 3x3 -> HxWx3
     # world_coords_points = np.einsum("ij,hwj->hwi", R_cam_to_world, cam_coords_points) + t_cam_to_world
 
     return world_coords_points, cam_coords_points, point_mask
 
 
-def depth_to_cam_coords_points(
-    depth_map: np.ndarray, intrinsic: np.ndarray
-) -> np.ndarray:
+def depth_to_cam_coords_points(depth_map: np.ndarray, intrinsic: np.ndarray) -> np.ndarray:
     """
     Unprojects a depth map into camera coordinates, returning (H, W, 3).
 
@@ -388,9 +379,7 @@ def depth_to_cam_coords_points(
     """
     H, W = depth_map.shape
     assert intrinsic.shape == (3, 3), "Intrinsic matrix must be 3x3"
-    assert (
-        intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0
-    ), "Intrinsic matrix must have zero skew"
+    assert intrinsic[0, 1] == 0 and intrinsic[1, 0] == 0, "Intrinsic matrix must have zero skew"
 
     # Intrinsic parameters
     fu, fv = intrinsic[0, 0], intrinsic[1, 1]
@@ -398,7 +387,7 @@ def depth_to_cam_coords_points(
 
     # Generate grid of pixel coordinates
     u, v = np.meshgrid(np.arange(W), np.arange(H))
-    
+
     # Unproject to camera coordinates
     x_cam = (u - cu) * depth_map / fu
     y_cam = (v - cv) * depth_map / fv
@@ -408,9 +397,7 @@ def depth_to_cam_coords_points(
     return np.stack((x_cam, y_cam, z_cam), axis=-1).astype(np.float32)
 
 
-def rotate_90_degrees(
-    image, depth_map, extri_opencv, intri_opencv, clockwise=True, track=None
-):
+def rotate_90_degrees(image, depth_map, extri_opencv, intri_opencv, clockwise=True, track=None):
     """
     Rotates the input image, depth map, and camera parameters by 90 degrees.
 
@@ -527,17 +514,9 @@ def adjust_extrinsic_matrix_rot90(extri_opencv, clockwise):
     t = extri_opencv[:, 3]
 
     if clockwise:
-        R_rotation = np.array([
-            [0, -1, 0],
-            [1,  0, 0],
-            [0,  0, 1]
-        ])
+        R_rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
     else:
-        R_rotation = np.array([
-            [0, 1, 0],
-            [-1, 0, 0],
-            [0, 0, 1]
-        ])
+        R_rotation = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
 
     new_R = np.dot(R_rotation, R)
     new_t = np.dot(R_rotation, t)

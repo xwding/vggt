@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 from .worker_fn import get_worker_init_fn
 
+
 class DynamicTorchDataset(ABC):
     def __init__(
         self,
@@ -46,22 +47,22 @@ class DynamicTorchDataset(ABC):
 
         # Extract aspect ratio and image number ranges from the configuration
         self.aspect_ratio_range = common_config.augs.aspects  # e.g., [0.5, 1.0]
-        self.image_num_range = common_config.img_nums    # e.g., [2, 24]
+        self.image_num_range = common_config.img_nums  # e.g., [2, 24]
 
         # Validate the aspect ratio and image number ranges
         if len(self.aspect_ratio_range) != 2 or self.aspect_ratio_range[0] > self.aspect_ratio_range[1]:
             raise ValueError(f"aspect_ratio_range must be [min, max] with min <= max, got {self.aspect_ratio_range}")
-        if len(self.image_num_range) != 2 or self.image_num_range[0] < 1 or self.image_num_range[0] > self.image_num_range[1]:
+        if (
+            len(self.image_num_range) != 2
+            or self.image_num_range[0] < 1
+            or self.image_num_range[0] > self.image_num_range[1]
+        ):
             raise ValueError(f"image_num_range must be [min, max] with 1 <= min <= max, got {self.image_num_range}")
 
         # Create samplers
         self.sampler = DynamicDistributedSampler(self.dataset, seed=seed, shuffle=shuffle)
         self.batch_sampler = DynamicBatchSampler(
-            self.sampler,
-            self.aspect_ratio_range,
-            self.image_num_range,
-            seed=seed,
-            max_img_per_gpu=max_img_per_gpu
+            self.sampler, self.aspect_ratio_range, self.image_num_range, seed=seed, max_img_per_gpu=max_img_per_gpu
         )
 
     def get_loader(self, epoch):
@@ -89,20 +90,15 @@ class DynamicTorchDataset(ABC):
                 worker_init_fn=self.worker_init_fn,
             ),
         )
-        
+
 
 class DynamicBatchSampler(Sampler):
     """
     A custom batch sampler that dynamically adjusts batch size, aspect ratio, and image number
     for each sample. Batches within a sample share the same aspect ratio and image number.
     """
-    def __init__(self,
-                 sampler,
-                 aspect_ratio_range,
-                 image_num_range,
-                 epoch=0,
-                 seed=42,
-                 max_img_per_gpu=48):
+
+    def __init__(self, sampler, aspect_ratio_range, image_num_range, epoch=0, seed=42, max_img_per_gpu=48):
         """
         Initializes the dynamic batch sampler.
 
@@ -121,11 +117,12 @@ class DynamicBatchSampler(Sampler):
 
         # Uniformly sample from the range of possible image numbers
         # For any image number, the weight is 1.0 (uniform sampling). You can set any different weights here.
-        self.image_num_weights = {num_images: 1.0 for num_images in range(image_num_range[0], image_num_range[1]+1)}
+        self.image_num_weights = {num_images: 1.0 for num_images in range(image_num_range[0], image_num_range[1] + 1)}
 
         # Possible image numbers, e.g., [2, 3, 4, ..., 24]
-        self.possible_nums = np.array([n for n in self.image_num_weights.keys()
-                                       if self.image_num_range[0] <= n <= self.image_num_range[1]])
+        self.possible_nums = np.array(
+            [n for n in self.image_num_weights.keys() if self.image_num_range[0] <= n <= self.image_num_range[1]]
+        )
 
         # Normalize weights for sampling
         weights = [self.image_num_weights[n] for n in self.possible_nums]
@@ -164,10 +161,7 @@ class DynamicBatchSampler(Sampler):
                 random_aspect_ratio = round(self.rng.uniform(self.aspect_ratio_range[0], self.aspect_ratio_range[1]), 2)
 
                 # Update sampler parameters
-                self.sampler.update_parameters(
-                    aspect_ratio=random_aspect_ratio,
-                    image_num=random_image_num
-                )
+                self.sampler.update_parameters(aspect_ratio=random_aspect_ratio, image_num=random_image_num)
 
                 # Calculate batch size based on max images per GPU and current image number
                 batch_size = self.max_img_per_gpu / random_image_num
@@ -201,6 +195,7 @@ class DynamicDistributedSampler(DistributedSampler):
     Extends PyTorch's DistributedSampler to include dynamic aspect_ratio and image_num
     parameters, which can be passed into the dataset's __getitem__ method.
     """
+
     def __init__(
         self,
         dataset,
@@ -210,14 +205,7 @@ class DynamicDistributedSampler(DistributedSampler):
         seed: int = 0,
         drop_last: bool = False,
     ):
-        super().__init__(
-            dataset,
-            num_replicas=num_replicas,
-            rank=rank,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last
-        )
+        super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle, seed=seed, drop_last=drop_last)
         self.aspect_ratio = None
         self.image_num = None
 
@@ -230,7 +218,11 @@ class DynamicDistributedSampler(DistributedSampler):
         indices_iter = super().__iter__()
 
         for idx in indices_iter:
-            yield (idx, self.image_num, self.aspect_ratio,)
+            yield (
+                idx,
+                self.image_num,
+                self.aspect_ratio,
+            )
 
     def update_parameters(self, aspect_ratio, image_num):
         """

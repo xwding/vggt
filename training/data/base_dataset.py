@@ -30,6 +30,7 @@ class BaseDataset(Dataset):
         rescale_aug: Whether to apply augmentation during rescaling
         landscape_check: Whether to handle landscape vs portrait orientation
     """
+
     def __init__(
         self,
         common_conf,
@@ -68,9 +69,7 @@ class BaseDataset(Dataset):
             Dataset item as returned by get_data()
         """
         seq_index, img_per_seq, aspect_ratio = idx_N
-        return self.get_data(
-            seq_index=seq_index, img_per_seq=img_per_seq, aspect_ratio=aspect_ratio
-        )
+        return self.get_data(seq_index=seq_index, img_per_seq=img_per_seq, aspect_ratio=aspect_ratio)
 
     def get_data(self, seq_index=None, seq_name=None, ids=None, aspect_ratio=1.0):
         """
@@ -162,9 +161,7 @@ class BaseDataset(Dataset):
 
         # Apply random scale augmentation during training if enabled
         if self.training and self.aug_scale:
-            random_h_scale, random_w_scale = np.random.uniform(
-                self.aug_scale[0], self.aug_scale[1], 2
-            )
+            random_h_scale, random_w_scale = np.random.uniform(self.aug_scale[0], self.aug_scale[1], 2)
             # Avoid random padding by capping at 1.0
             random_h_scale = min(random_h_scale, 1.0)
             random_w_scale = min(random_w_scale, 1.0)
@@ -175,7 +172,12 @@ class BaseDataset(Dataset):
 
         # Move principal point to the image center and crop if necessary
         image, depth_map, intri_opencv, track = crop_image_depth_and_intrinsic_by_pp(
-            image, depth_map, intri_opencv, aug_size, track=track, filepath=filepath,
+            image,
+            depth_map,
+            intri_opencv,
+            aug_size,
+            track=track,
+            filepath=filepath,
         )
 
         original_size = np.array(image.shape[:2])  # update original_size
@@ -193,16 +195,27 @@ class BaseDataset(Dataset):
         # Resize images and update intrinsics
         if self.rescale:
             image, depth_map, intri_opencv, track = resize_image_depth_and_intrinsic(
-                image, depth_map, intri_opencv, target_shape, original_size, track=track,
+                image,
+                depth_map,
+                intri_opencv,
+                target_shape,
+                original_size,
+                track=track,
                 safe_bound=safe_bound,
-                rescale_aug=self.rescale_aug
+                rescale_aug=self.rescale_aug,
             )
         else:
             print("Not rescaling the images")
 
         # Ensure final crop to target shape
         image, depth_map, intri_opencv, track = crop_image_depth_and_intrinsic_by_pp(
-            image, depth_map, intri_opencv, target_shape, track=track, filepath=filepath, strict=True,
+            image,
+            depth_map,
+            intri_opencv,
+            target_shape,
+            track=track,
+            filepath=filepath,
+            strict=True,
         )
 
         # Apply 90-degree rotation if needed
@@ -219,8 +232,8 @@ class BaseDataset(Dataset):
             )
 
         # Convert depth to world and camera coordinates
-        world_coords_points, cam_coords_points, point_mask = (
-            depth_to_world_coords_points(depth_map, extri_opencv, intri_opencv)
+        world_coords_points, cam_coords_points, point_mask = depth_to_world_coords_points(
+            depth_map, extri_opencv, intri_opencv
         )
 
         return (
@@ -294,7 +307,7 @@ class BaseDataset(Dataset):
         sampled_ids = np.random.choice(
             valid_range,
             size=(total_ids - 1),
-            replace=True,   # we accept the situation that some sampled ids are the same
+            replace=True,  # we accept the situation that some sampled ids are the same
         )
 
         # Insert the start_idx at the beginning

@@ -48,7 +48,7 @@ class VKittiDataset(BaseDataset):
         self.get_nearby = common_conf.get_nearby
         self.inside_random = common_conf.inside_random
         self.allow_duplicate_img = common_conf.allow_duplicate_img
-        
+
         self.expand_ratio = expand_ratio
         self.VKitti_DIR = VKitti_DIR
         self.min_num_images = min_num_images
@@ -59,7 +59,7 @@ class VKittiDataset(BaseDataset):
             self.len_train = len_test
         else:
             raise ValueError(f"Invalid split: {split}")
-        
+
         logging.info(f"VKitti_DIR is {self.VKitti_DIR}")
 
         # Load or generate sequence list
@@ -68,8 +68,8 @@ class VKittiDataset(BaseDataset):
             with open(txt_path, 'r') as f:
                 sequence_list = [line.strip() for line in f.readlines()]
         else:
-            # Generate sequence list and save to txt            
-            sequence_list = glob.glob(osp.join(self.VKitti_DIR, "*/*/*/rgb/*"))            
+            # Generate sequence list and save to txt
+            sequence_list = glob.glob(osp.join(self.VKitti_DIR, "*/*/*/rgb/*"))
             sequence_list = [file_path.split(self.VKitti_DIR)[-1].lstrip('/') for file_path in sequence_list]
             sequence_list = sorted(sequence_list)
 
@@ -118,16 +118,12 @@ class VKittiDataset(BaseDataset):
         # Load camera parameters
         try:
             camera_parameters = np.loadtxt(
-                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "extrinsic.txt"), 
-                delimiter=" ", 
-                skiprows=1
+                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "extrinsic.txt"), delimiter=" ", skiprows=1
             )
             camera_parameters = camera_parameters[camera_parameters[:, 1] == camera_id]
 
             camera_intrinsic = np.loadtxt(
-                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "intrinsic.txt"), 
-                delimiter=" ", 
-                skiprows=1
+                osp.join(self.VKitti_DIR, "/".join(seq_name.split("/")[:2]), "intrinsic.txt"), delimiter=" ", skiprows=1
             )
             camera_intrinsic = camera_intrinsic[camera_intrinsic[:, 1] == camera_id]
         except Exception as e:
@@ -162,7 +158,9 @@ class VKittiDataset(BaseDataset):
             depth_map = depth_map / 100
             depth_map = threshold_depth_map(depth_map, max_percentile=-1, min_percentile=-1, max_depth=self.depth_max)
 
-            assert image.shape[:2] == depth_map.shape, f"Image and depth shape mismatch: {image.shape[:2]} vs {depth_map.shape}"
+            assert (
+                image.shape[:2] == depth_map.shape
+            ), f"Image and depth shape mismatch: {image.shape[:2]} vs {depth_map.shape}"
 
             original_size = np.array(image.shape[:2])
 

@@ -181,7 +181,7 @@ def project_world_points_to_camera_points_batch(world_points, cam_extrinsics):
     Returns:
     """
     # TODO: merge this into project_world_points_to_cam
-    
+
     # device = world_points.device
     # with torch.autocast(device_type=device.type, enabled=False):
     ones = torch.ones_like(world_points[..., :1])  # shape: (B, S, H, W, 1)
@@ -198,7 +198,6 @@ def project_world_points_to_camera_points_batch(world_points, cam_extrinsics):
     camera_points = torch.matmul(extrinsics_exp, world_points_h_exp).squeeze(-1)
 
     return camera_points
-
 
 
 def project_world_points_to_cam(
@@ -224,19 +223,13 @@ def project_world_points_to_cam(
     with torch.autocast(device_type=device.type, enabled=False):
         N = world_points.shape[0]  # Number of points
         B = cam_extrinsics.shape[0]  # Batch size, i.e., number of cameras
-        world_points_homogeneous = torch.cat(
-            [world_points, torch.ones_like(world_points[..., 0:1])], dim=1
-        )  # Nx4
+        world_points_homogeneous = torch.cat([world_points, torch.ones_like(world_points[..., 0:1])], dim=1)  # Nx4
         # Reshape for batch processing
-        world_points_homogeneous = world_points_homogeneous.unsqueeze(0).expand(
-            B, -1, -1
-        )  # BxNx4
+        world_points_homogeneous = world_points_homogeneous.unsqueeze(0).expand(B, -1, -1)  # BxNx4
 
         # Step 1: Apply extrinsic parameters
         # Transform 3D points to camera coordinate system for all cameras
-        cam_points = torch.bmm(
-            cam_extrinsics, world_points_homogeneous.transpose(-1, -2)
-        )
+        cam_points = torch.bmm(cam_extrinsics, world_points_homogeneous.transpose(-1, -2))
 
         if only_points_cam:
             return None, cam_points
@@ -245,7 +238,6 @@ def project_world_points_to_cam(
         image_points = img_from_cam(cam_intrinsics, cam_points, distortion_params, default=default)
 
         return image_points, cam_points
-
 
 
 def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0):
@@ -274,9 +266,7 @@ def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0
         distorted_xy = ndc_xy
 
     # Prepare cam_points for batch matrix multiplication
-    cam_coords_homo = torch.cat(
-        (distorted_xy, torch.ones_like(distorted_xy[:, :1, :])), dim=1
-    )  # Bx3xN
+    cam_coords_homo = torch.cat((distorted_xy, torch.ones_like(distorted_xy[:, :1, :])), dim=1)  # Bx3xN
     # Apply intrinsic parameters using batch matrix multiplication
     pixel_coords = torch.bmm(cam_intrinsics, cam_coords_homo)  # Bx3xN
 
@@ -287,8 +277,6 @@ def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0
     pixel_coords = torch.nan_to_num(pixel_coords, nan=default)
 
     return pixel_coords.transpose(1, 2)  # BxNx2
-
-
 
 
 def cam_from_img(pred_tracks, intrinsics, extra_params=None):
@@ -313,12 +301,8 @@ def cam_from_img(pred_tracks, intrinsics, extra_params=None):
     if extra_params is not None:
         # Apply iterative undistortion
         try:
-            tracks_normalized = iterative_undistortion(
-                extra_params, tracks_normalized
-            )
+            tracks_normalized = iterative_undistortion(extra_params, tracks_normalized)
         except:
-            tracks_normalized = single_undistortion(
-                extra_params, tracks_normalized
-            )
+            tracks_normalized = single_undistortion(extra_params, tracks_normalized)
 
     return tracks_normalized

@@ -17,6 +17,7 @@ from torch import Tensor
 # Optimizer wrapper
 # -----------------------------------------------------------------------------
 
+
 class OptimizerWrapper:
     """Wraps a torch.optim.Optimizer and its schedulers (if any)."""
 
@@ -86,10 +87,10 @@ def validate_param_group_params(param_groups: List[Dict], model: nn.Module):
 from wcmatch import fnmatch
 
 GLOB_FLAGS = (
-    fnmatch.CASE       # case-sensitive
-    | fnmatch.DOTMATCH # '*' also matches '.'
-    | fnmatch.EXTMATCH # extended patterns like *(foo|bar)
-    | fnmatch.SPLIT    # "pat1|pat2" works out-of-the-box
+    fnmatch.CASE  # case-sensitive
+    | fnmatch.DOTMATCH  # '*' also matches '.'
+    | fnmatch.EXTMATCH  # extended patterns like *(foo|bar)
+    | fnmatch.SPLIT  # "pat1|pat2" works out-of-the-box
 )
 
 
@@ -108,8 +109,9 @@ def get_module_cls_to_param_names(model: nn.Module) -> Dict[type, Set[str]]:
     return mapping
 
 
-def unix_param_pattern_to_parameter_names(filter_param_names: Union[List[str], None],
-                                           parameter_names: Set[str]) -> Set[str]:
+def unix_param_pattern_to_parameter_names(
+    filter_param_names: Union[List[str], None], parameter_names: Set[str]
+) -> Set[str]:
     if filter_param_names is None:
         return set()
     allowed = []
@@ -122,8 +124,9 @@ def unix_param_pattern_to_parameter_names(filter_param_names: Union[List[str], N
     return set.union(*allowed)
 
 
-def unix_module_cls_pattern_to_parameter_names(filter_module_cls_names: Union[List[str], None],
-                                               module_cls_to_param_names: Dict[type, Set[str]]) -> Set[str]:
+def unix_module_cls_pattern_to_parameter_names(
+    filter_module_cls_names: Union[List[str], None], module_cls_to_param_names: Dict[type, Set[str]]
+) -> Set[str]:
     if filter_module_cls_names is None:
         return set()
     allowed = []
@@ -139,17 +142,13 @@ def unix_module_cls_pattern_to_parameter_names(filter_module_cls_names: Union[Li
     return set.union(*allowed)
 
 
-def _unix_pattern_to_parameter_names(scheduler_cfg,
-                                     parameter_names: Set[str],
-                                     module_cls_to_param_names: Dict[type, Set[str]]):
+def _unix_pattern_to_parameter_names(
+    scheduler_cfg, parameter_names: Set[str], module_cls_to_param_names: Dict[type, Set[str]]
+):
     if "param_names" not in scheduler_cfg and "module_cls_names" not in scheduler_cfg:
         return None
-    return unix_param_pattern_to_parameter_names(
-        scheduler_cfg.get("param_names"), parameter_names
-    ).union(
-        unix_module_cls_pattern_to_parameter_names(
-            scheduler_cfg.get("module_cls_names"), module_cls_to_param_names
-        )
+    return unix_param_pattern_to_parameter_names(scheduler_cfg.get("param_names"), parameter_names).union(
+        unix_module_cls_pattern_to_parameter_names(scheduler_cfg.get("module_cls_names"), module_cls_to_param_names)
     )
 
 
@@ -162,9 +161,7 @@ def set_default_parameters(scheduler_cfgs: List[dict], all_parameter_names: Set[
     """Ensure exactly one scheduler per option acts as the default."""
     specified = [cfg["parameter_names"] for cfg in scheduler_cfgs if cfg["parameter_names"]]
 
-    default_params = (
-        all_parameter_names if not specified else all_parameter_names - set.union(*specified)
-    )
+    default_params = all_parameter_names if not specified else all_parameter_names - set.union(*specified)
 
     default_count = 0
     for cfg in scheduler_cfgs:
@@ -177,14 +174,14 @@ def set_default_parameters(scheduler_cfgs: List[dict], all_parameter_names: Set[
         scheduler_cfgs.append({"parameter_names": default_params})
 
 
-def name_constraints_to_parameters(param_constraints: List[Set[str]],
-                                   named_parameters: Dict[str, Tensor]) -> List[Tensor]:
+def name_constraints_to_parameters(
+    param_constraints: List[Set[str]], named_parameters: Dict[str, Tensor]
+) -> List[Tensor]:
     matching_names = set.intersection(*param_constraints)
     return [v for k, v in named_parameters.items() if k in matching_names]
 
 
-def map_scheduler_cfgs_to_param_groups(all_scheduler_cfgs: Iterable[List[dict]],
-                                       named_parameters: Dict[str, Tensor]):
+def map_scheduler_cfgs_to_param_groups(all_scheduler_cfgs: Iterable[List[dict]], named_parameters: Dict[str, Tensor]):
     """Produce param groups & schedulers that torch.optim can consume."""
     schedulers: List[Dict[str, Any]] = []
     param_groups: List[Dict[str, List[Tensor]]] = []
@@ -205,11 +202,13 @@ def map_scheduler_cfgs_to_param_groups(all_scheduler_cfgs: Iterable[List[dict]],
 # -----------------------------------------------------------------------------
 
 
-def construct_optimizer(model: nn.Module,
-                        optimizer_conf: Any,
-                        options_conf: Union[Mapping[str, List], None] = None,
-                        param_group_modifiers_conf: Union[List, None] = None,
-                        validate_param_groups: bool = True) -> OptimizerWrapper:
+def construct_optimizer(
+    model: nn.Module,
+    optimizer_conf: Any,
+    options_conf: Union[Mapping[str, List], None] = None,
+    param_group_modifiers_conf: Union[List, None] = None,
+    validate_param_groups: bool = True,
+) -> OptimizerWrapper:
     """Build an OptimizerWrapper from hydra configs.
 
     *No* allowlist handling – we always optimize *all* model parameters.
@@ -248,9 +247,7 @@ def construct_optimizer(model: nn.Module,
             all_scheduler_cfgs = modifier(scheduler_cfgs=all_scheduler_cfgs, model=model)
 
     # Map scheduler cfg combos to optimizer param groups
-    schedulers, param_groups = map_scheduler_cfgs_to_param_groups(
-        all_scheduler_cfgs, named_parameters
-    )
+    schedulers, param_groups = map_scheduler_cfgs_to_param_groups(all_scheduler_cfgs, named_parameters)
 
     if validate_param_groups:
         validate_param_group_params(param_groups, model)

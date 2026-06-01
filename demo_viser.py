@@ -18,7 +18,6 @@ import viser
 import viser.transforms as viser_tf
 import cv2
 
-
 try:
     import onnxruntime
 except ImportError:

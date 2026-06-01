@@ -17,13 +17,14 @@ from math import ceil, floor
 class MultitaskLoss(torch.nn.Module):
     """
     Multi-task loss module that combines different loss types for VGGT.
-    
+
     Supports:
     - Camera loss
-    - Depth loss 
+    - Depth loss
     - Point loss
     - Tracking loss (not cleaned yet, dirty code is at the bottom of this file)
     """
+
     def __init__(self, camera=None, depth=None, point=None, track=None, **kwargs):
         super().__init__()
         # Loss configuration dictionaries for each task
@@ -35,28 +36,32 @@ class MultitaskLoss(torch.nn.Module):
     def forward(self, predictions, batch) -> torch.Tensor:
         """
         Compute the total multi-task loss.
-        
+
         Args:
             predictions: Dict containing model predictions for different tasks
             batch: Dict containing ground truth data and masks
-            
+
         Returns:
             Dict containing individual losses and total objective
         """
         total_loss = 0
         loss_dict = {}
-        
+
         # Camera pose loss - if pose encodings are predicted
         if "pose_enc_list" in predictions:
-            camera_loss_dict = compute_camera_loss(predictions, batch, **self.camera)   
-            camera_loss = camera_loss_dict["loss_camera"] * self.camera["weight"]   
+            camera_loss_dict = compute_camera_loss(predictions, batch, **self.camera)
+            camera_loss = camera_loss_dict["loss_camera"] * self.camera["weight"]
             total_loss = total_loss + camera_loss
             loss_dict.update(camera_loss_dict)
-        
+
         # Depth estimation loss - if depth maps are predicted
         if "depth" in predictions:
             depth_loss_dict = compute_depth_loss(predictions, batch, **self.depth)
-            depth_loss = depth_loss_dict["loss_conf_depth"] + depth_loss_dict["loss_reg_depth"] + depth_loss_dict["loss_grad_depth"]
+            depth_loss = (
+                depth_loss_dict["loss_conf_depth"]
+                + depth_loss_dict["loss_reg_depth"]
+                + depth_loss_dict["loss_grad_depth"]
+            )
             depth_loss = depth_loss * self.depth["weight"]
             total_loss = total_loss + depth_loss
             loss_dict.update(depth_loss_dict)
@@ -64,7 +69,11 @@ class MultitaskLoss(torch.nn.Module):
         # 3D point reconstruction loss - if world points are predicted
         if "world_points" in predictions:
             point_loss_dict = compute_point_loss(predictions, batch, **self.point)
-            point_loss = point_loss_dict["loss_conf_point"] + point_loss_dict["loss_reg_point"] + point_loss_dict["loss_grad_point"]
+            point_loss = (
+                point_loss_dict["loss_conf_point"]
+                + point_loss_dict["loss_reg_point"]
+                + point_loss_dict["loss_grad_point"]
+            )
             point_loss = point_loss * self.point["weight"]
             total_loss = total_loss + point_loss
             loss_dict.update(point_loss_dict)
@@ -72,22 +81,22 @@ class MultitaskLoss(torch.nn.Module):
         # Tracking loss - not cleaned yet, dirty code is at the bottom of this file
         if "track" in predictions:
             raise NotImplementedError("Track loss is not cleaned up yet")
-        
+
         loss_dict["objective"] = total_loss
 
         return loss_dict
 
 
 def compute_camera_loss(
-    pred_dict,              # predictions dict, contains pose encodings
-    batch_data,             # ground truth and mask batch dict
-    loss_type="l1",         # "l1" or "l2" loss
-    gamma=0.6,              # temporal decay weight for multi-stage training
+    pred_dict,  # predictions dict, contains pose encodings
+    batch_data,  # ground truth and mask batch dict
+    loss_type="l1",  # "l1" or "l2" loss
+    gamma=0.6,  # temporal decay weight for multi-stage training
     pose_encoding_type="absT_quaR_FoV",
-    weight_trans=1.0,       # weight for translation loss
-    weight_rot=1.0,         # weight for rotation loss
-    weight_focal=0.5,       # weight for focal length loss
-    **kwargs
+    weight_trans=1.0,  # weight for translation loss
+    weight_rot=1.0,  # weight for rotation loss
+    weight_focal=0.5,  # weight for focal length loss
+    **kwargs,
 ):
     # List of predicted pose encodings per stage
     pred_pose_encodings = pred_dict['pose_enc_list']
@@ -127,7 +136,7 @@ def compute_camera_loss(
             loss_T_stage, loss_R_stage, loss_FL_stage = camera_loss_single(
                 pred_pose_stage[valid_frame_mask].clone(),
                 gt_pose_encoding[valid_frame_mask].clone(),
-                loss_type=loss_type
+                loss_type=loss_type,
             )
         # Accumulate weighted losses across stages
         total_loss_T += loss_T_stage * stage_weight
@@ -140,24 +149,16 @@ def compute_camera_loss(
     avg_loss_FL = total_loss_FL / n_stages
 
     # Compute total weighted camera loss
-    total_camera_loss = (
-        avg_loss_T * weight_trans +
-        avg_loss_R * weight_rot +
-        avg_loss_FL * weight_focal
-    )
+    total_camera_loss = avg_loss_T * weight_trans + avg_loss_R * weight_rot + avg_loss_FL * weight_focal
 
     # Return loss dictionary with individual components
-    return {
-        "loss_camera": total_camera_loss,
-        "loss_T": avg_loss_T,
-        "loss_R": avg_loss_R,
-        "loss_FL": avg_loss_FL
-    }
+    return {"loss_camera": total_camera_loss, "loss_T": avg_loss_T, "loss_R": avg_loss_R, "loss_FL": avg_loss_FL}
+
 
 def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
     """
     Computes translation, rotation, and focal loss for a batch of pose encodings.
-    
+
     Args:
         pred_pose_enc: (N, D) predicted pose encoding
         gt_pose_enc: (N, D) ground truth pose encoding
@@ -166,7 +167,7 @@ def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
         loss_T: translation loss (mean)
         loss_R: rotation loss (mean)
         loss_FL: focal length/intrinsics loss (mean)
-    
+
     NOTE: The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.
         So here we use l1 loss.
     """
@@ -196,10 +197,10 @@ def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
     return loss_T, loss_R, loss_FL
 
 
-def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn = None, valid_range=-1, **kwargs):
+def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn=None, valid_range=-1, **kwargs):
     """
     Compute point loss.
-    
+
     Args:
         predictions: Dict containing 'world_points' and 'world_points_conf'
         batch: Dict containing ground truth 'world_points' and 'point_masks'
@@ -212,34 +213,44 @@ def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
     pred_points_conf = predictions['world_points_conf']
     gt_points = batch['world_points']
     gt_points_mask = batch['point_masks']
-    
+
     gt_points = check_and_fix_inf_nan(gt_points, "gt_points")
-    
+
     if gt_points_mask.sum() < 100:
         # If there are less than 100 valid points, skip this batch
         dummy_loss = (0.0 * pred_points).mean()
-        loss_dict = {f"loss_conf_point": dummy_loss,
-                    f"loss_reg_point": dummy_loss,
-                    f"loss_grad_point": dummy_loss,}
+        loss_dict = {
+            f"loss_conf_point": dummy_loss,
+            f"loss_reg_point": dummy_loss,
+            f"loss_grad_point": dummy_loss,
+        }
         return loss_dict
-    
+
     # Compute confidence-weighted regression loss with optional gradient loss
-    loss_conf, loss_grad, loss_reg = regression_loss(pred_points, gt_points, gt_points_mask, conf=pred_points_conf,
-                                             gradient_loss_fn=gradient_loss_fn, gamma=gamma, alpha=alpha, valid_range=valid_range)
-    
+    loss_conf, loss_grad, loss_reg = regression_loss(
+        pred_points,
+        gt_points,
+        gt_points_mask,
+        conf=pred_points_conf,
+        gradient_loss_fn=gradient_loss_fn,
+        gamma=gamma,
+        alpha=alpha,
+        valid_range=valid_range,
+    )
+
     loss_dict = {
         f"loss_conf_point": loss_conf,
         f"loss_reg_point": loss_reg,
         f"loss_grad_point": loss_grad,
     }
-    
+
     return loss_dict
 
 
-def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn = None, valid_range=-1, **kwargs):
+def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn=None, valid_range=-1, **kwargs):
     """
     Compute depth loss.
-    
+
     Args:
         predictions: Dict containing 'depth' and 'depth_conf'
         batch: Dict containing ground truth 'depths' and 'point_masks'
@@ -253,25 +264,35 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
 
     gt_depth = batch['depths']
     gt_depth = check_and_fix_inf_nan(gt_depth, "gt_depth")
-    gt_depth = gt_depth[..., None]              # (B, H, W, 1)
-    gt_depth_mask = batch['point_masks'].clone()   # 3D points derived from depth map, so we use the same mask
+    gt_depth = gt_depth[..., None]  # (B, H, W, 1)
+    gt_depth_mask = batch['point_masks'].clone()  # 3D points derived from depth map, so we use the same mask
 
     if gt_depth_mask.sum() < 100:
         # If there are less than 100 valid points, skip this batch
         dummy_loss = (0.0 * pred_depth).mean()
-        loss_dict = {f"loss_conf_depth": dummy_loss,
-                    f"loss_reg_depth": dummy_loss,
-                    f"loss_grad_depth": dummy_loss,}
+        loss_dict = {
+            f"loss_conf_depth": dummy_loss,
+            f"loss_reg_depth": dummy_loss,
+            f"loss_grad_depth": dummy_loss,
+        }
         return loss_dict
 
     # NOTE: we put conf inside regression_loss so that we can also apply conf loss to the gradient loss in a multi-scale manner
     # this is hacky, but very easier to implement
-    loss_conf, loss_grad, loss_reg = regression_loss(pred_depth, gt_depth, gt_depth_mask, conf=pred_depth_conf,
-                                             gradient_loss_fn=gradient_loss_fn, gamma=gamma, alpha=alpha, valid_range=valid_range)
+    loss_conf, loss_grad, loss_reg = regression_loss(
+        pred_depth,
+        gt_depth,
+        gt_depth_mask,
+        conf=pred_depth_conf,
+        gradient_loss_fn=gradient_loss_fn,
+        gamma=gamma,
+        alpha=alpha,
+        valid_range=valid_range,
+    )
 
     loss_dict = {
         f"loss_conf_depth": loss_conf,
-        f"loss_reg_depth": loss_reg,    
+        f"loss_reg_depth": loss_reg,
         f"loss_grad_depth": loss_grad,
     }
 
@@ -281,11 +302,11 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
 def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0, alpha=0.2, valid_range=-1):
     """
     Core regression loss function with confidence weighting and optional gradient loss.
-    
+
     Computes:
     1. gamma * ||pred - gt||^2 * conf - alpha * log(conf)
     2. Optional gradient loss
-    
+
     Args:
         pred: (B, S, H, W, C) predicted values
         gt: (B, S, H, W, C) ground truth values
@@ -295,7 +316,7 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
         gamma: Weight for confidence loss
         alpha: Weight for confidence regularization
         valid_range: Quantile range for outlier filtering
-    
+
     Returns:
         loss_conf: Confidence-weighted loss
         loss_grad: Gradient loss (0 if not specified)
@@ -311,13 +332,13 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     # This encourages the model to be confident on easy examples and less confident on hard ones
     loss_conf = gamma * loss_reg * conf[mask] - alpha * torch.log(conf[mask])
     loss_conf = check_and_fix_inf_nan(loss_conf, "loss_conf")
-        
+
     # Initialize gradient loss
     loss_grad = 0
 
     # Prepare confidence for gradient loss if needed
     if "conf" in gradient_loss_fn:
-        to_feed_conf = conf.reshape(bb*ss, hh, ww)
+        to_feed_conf = conf.reshape(bb * ss, hh, ww)
     else:
         to_feed_conf = None
 
@@ -325,9 +346,9 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     if "normal" in gradient_loss_fn:
         # Surface normal-based gradient loss
         loss_grad = gradient_loss_multi_scale_wrapper(
-            pred.reshape(bb*ss, hh, ww, nc),
-            gt.reshape(bb*ss, hh, ww, nc),
-            mask.reshape(bb*ss, hh, ww),
+            pred.reshape(bb * ss, hh, ww, nc),
+            gt.reshape(bb * ss, hh, ww, nc),
+            mask.reshape(bb * ss, hh, ww),
             gradient_loss_fn=normal_loss,
             scales=3,
             conf=to_feed_conf,
@@ -335,9 +356,9 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     elif "grad" in gradient_loss_fn:
         # Standard gradient-based loss
         loss_grad = gradient_loss_multi_scale_wrapper(
-            pred.reshape(bb*ss, hh, ww, nc),
-            gt.reshape(bb*ss, hh, ww, nc),
-            mask.reshape(bb*ss, hh, ww),
+            pred.reshape(bb * ss, hh, ww, nc),
+            gt.reshape(bb * ss, hh, ww, nc),
+            mask.reshape(bb * ss, hh, ww),
             gradient_loss_fn=gradient_loss,
             conf=to_feed_conf,
         )
@@ -345,7 +366,7 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     # Process confidence-weighted loss
     if loss_conf.numel() > 0:
         # Filter out outliers using quantile-based thresholding
-        if valid_range>0:
+        if valid_range > 0:
             loss_conf = filter_by_quantile(loss_conf, valid_range)
 
         loss_conf = check_and_fix_inf_nan(loss_conf, f"loss_conf_depth")
@@ -356,7 +377,7 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     # Process regular regression loss
     if loss_reg.numel() > 0:
         # Filter out outliers using quantile-based thresholding
-        if valid_range>0:
+        if valid_range > 0:
             loss_reg = filter_by_quantile(loss_reg, valid_range)
 
         loss_reg = check_and_fix_inf_nan(loss_reg, f"loss_reg_depth")
@@ -367,14 +388,14 @@ def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0,
     return loss_conf, loss_grad, loss_reg
 
 
-def gradient_loss_multi_scale_wrapper(prediction, target, mask, scales=4, gradient_loss_fn = None, conf=None):
+def gradient_loss_multi_scale_wrapper(prediction, target, mask, scales=4, gradient_loss_fn=None, conf=None):
     """
     Multi-scale gradient loss wrapper. Applies gradient loss at multiple scales by subsampling the input.
     This helps capture both fine and coarse spatial structures.
-    
+
     Args:
         prediction: (B, H, W, C) predicted values
-        target: (B, H, W, C) ground truth values  
+        target: (B, H, W, C) ground truth values
         mask: (B, H, W) valid pixel mask
         scales: Number of scales to use
         gradient_loss_fn: Gradient loss function to apply
@@ -388,7 +409,7 @@ def gradient_loss_multi_scale_wrapper(prediction, target, mask, scales=4, gradie
             prediction[:, ::step, ::step],
             target[:, ::step, ::step],
             mask[:, ::step, ::step],
-            conf=conf[:, ::step, ::step] if conf is not None else None
+            conf=conf[:, ::step, ::step] if conf is not None else None,
         )
 
     total = total / scales
@@ -398,10 +419,10 @@ def gradient_loss_multi_scale_wrapper(prediction, target, mask, scales=4, gradie
 def normal_loss(prediction, target, mask, cos_eps=1e-8, conf=None, gamma=1.0, alpha=0.2):
     """
     Surface normal-based loss for geometric consistency.
-    
+
     Computes surface normals from 3D point maps using cross products of neighboring points,
     then measures the angle between predicted and ground truth normals.
-    
+
     Args:
         prediction: (B, H, W, 3) predicted 3D coordinates/points
         target: (B, H, W, 3) ground-truth 3D coordinates/points
@@ -413,7 +434,7 @@ def normal_loss(prediction, target, mask, cos_eps=1e-8, conf=None, gamma=1.0, al
     """
     # Convert point maps to surface normals using cross products
     pred_normals, pred_valids = point_map_to_normal(prediction, mask, eps=cos_eps)
-    gt_normals,   gt_valids   = point_map_to_normal(target,     mask, eps=cos_eps)
+    gt_normals, gt_valids = point_map_to_normal(target, mask, eps=cos_eps)
 
     # Only consider regions where both predicted and GT normals are valid
     all_valid = pred_valids & gt_valids  # shape: (4, B, H, W)
@@ -456,7 +477,7 @@ def normal_loss(prediction, target, mask, cos_eps=1e-8, conf=None, gamma=1.0, al
 def gradient_loss(prediction, target, mask, conf=None, gamma=1.0, alpha=0.2):
     """
     Gradient-based loss. Computes the L1 difference between adjacent pixels in x and y directions.
-    
+
     Args:
         prediction: (B, H, W, C) predicted values
         target: (B, H, W, C) ground truth values
@@ -511,15 +532,15 @@ def gradient_loss(prediction, target, mask, conf=None, gamma=1.0, alpha=0.2):
 def point_map_to_normal(point_map, mask, eps=1e-6):
     """
     Convert 3D point map to surface normal vectors using cross products.
-    
+
     Computes normals by taking cross products of neighboring point differences.
     Uses 4 different cross-product directions for robustness.
-    
+
     Args:
         point_map: (B, H, W, 3) 3D points laid out in a 2D grid
         mask: (B, H, W) valid pixels (bool)
         eps: Epsilon for numerical stability in normalization
-    
+
     Returns:
         normals: (4, B, H, W, 3) normal vectors for each of the 4 cross-product directions
         valids: (4, B, H, W) corresponding valid masks
@@ -527,36 +548,36 @@ def point_map_to_normal(point_map, mask, eps=1e-6):
     with torch.cuda.amp.autocast(enabled=False):
         # Pad inputs to avoid boundary issues
         padded_mask = F.pad(mask, (1, 1, 1, 1), mode='constant', value=0)
-        pts = F.pad(point_map.permute(0, 3, 1, 2), (1,1,1,1), mode='constant', value=0).permute(0, 2, 3, 1)
+        pts = F.pad(point_map.permute(0, 3, 1, 2), (1, 1, 1, 1), mode='constant', value=0).permute(0, 2, 3, 1)
 
         # Get neighboring points for each pixel
-        center = pts[:, 1:-1, 1:-1, :]   # B,H,W,3
-        up     = pts[:, :-2,  1:-1, :]
-        left   = pts[:, 1:-1, :-2 , :]
-        down   = pts[:, 2:,   1:-1, :]
-        right  = pts[:, 1:-1, 2:,   :]
+        center = pts[:, 1:-1, 1:-1, :]  # B,H,W,3
+        up = pts[:, :-2, 1:-1, :]
+        left = pts[:, 1:-1, :-2, :]
+        down = pts[:, 2:, 1:-1, :]
+        right = pts[:, 1:-1, 2:, :]
 
         # Compute direction vectors from center to neighbors
-        up_dir    = up    - center
-        left_dir  = left  - center
-        down_dir  = down  - center
+        up_dir = up - center
+        left_dir = left - center
+        down_dir = down - center
         right_dir = right - center
 
         # Compute four cross products for different normal directions
-        n1 = torch.cross(up_dir,   left_dir,  dim=-1)  # up x left
-        n2 = torch.cross(left_dir, down_dir,  dim=-1)  # left x down
+        n1 = torch.cross(up_dir, left_dir, dim=-1)  # up x left
+        n2 = torch.cross(left_dir, down_dir, dim=-1)  # left x down
         n3 = torch.cross(down_dir, right_dir, dim=-1)  # down x right
-        n4 = torch.cross(right_dir,up_dir,    dim=-1)  # right x up
+        n4 = torch.cross(right_dir, up_dir, dim=-1)  # right x up
 
         # Validity masks - require both direction pixels to be valid
-        v1 = padded_mask[:, :-2,  1:-1] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 1:-1, :-2]
-        v2 = padded_mask[:, 1:-1, :-2 ] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 2:,   1:-1]
-        v3 = padded_mask[:, 2:,   1:-1] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 1:-1, 2:]
-        v4 = padded_mask[:, 1:-1, 2:  ] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, :-2,  1:-1]
+        v1 = padded_mask[:, :-2, 1:-1] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 1:-1, :-2]
+        v2 = padded_mask[:, 1:-1, :-2] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 2:, 1:-1]
+        v3 = padded_mask[:, 2:, 1:-1] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, 1:-1, 2:]
+        v4 = padded_mask[:, 1:-1, 2:] & padded_mask[:, 1:-1, 1:-1] & padded_mask[:, :-2, 1:-1]
 
         # Stack normals and validity masks
         normals = torch.stack([n1, n2, n3, n4], dim=0)  # shape [4, B, H, W, 3]
-        valids  = torch.stack([v1, v2, v3, v4], dim=0)  # shape [4, B, H, W]
+        valids = torch.stack([v1, v2, v3, v4], dim=0)  # shape [4, B, H, W]
 
         # Normalize normal vectors
         normals = F.normalize(normals, p=2, dim=-1, eps=eps)
@@ -567,15 +588,15 @@ def point_map_to_normal(point_map, mask, eps=1e-6):
 def filter_by_quantile(loss_tensor, valid_range, min_elements=1000, hard_max=100):
     """
     Filter loss tensor by keeping only values below a certain quantile threshold.
-    
+
     This helps remove outliers that could destabilize training.
-    
+
     Args:
         loss_tensor: Tensor containing loss values
         valid_range: Float between 0 and 1 indicating the quantile threshold
         min_elements: Minimum number of elements required to apply filtering
         hard_max: Maximum allowed value for any individual loss
-    
+
     Returns:
         Filtered and clamped loss tensor
     """
@@ -606,7 +627,7 @@ def filter_by_quantile(loss_tensor, valid_range, min_elements=1000, hard_max=100
 def torch_quantile(
     input,
     q,
-    dim = None,
+    dim=None,
     keepdim: bool = False,
     *,
     interpolation: str = "nearest",
@@ -652,8 +673,7 @@ def torch_quantile(
         inter = ceil
     else:
         raise ValueError(
-            "Supported interpolations currently are {'nearest', 'lower', 'higher'} "
-            f"(got '{interpolation}')!"
+            "Supported interpolations currently are {'nearest', 'lower', 'higher'} " f"(got '{interpolation}')!"
         )
 
     # Validate out parameter
@@ -805,5 +825,3 @@ def sequence_loss(flow_preds, flow_gt, vis, valids, gamma=0.8, vis_aware=False, 
 
     return flow_loss
 '''
-
-

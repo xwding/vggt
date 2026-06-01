@@ -84,7 +84,7 @@ def run_model(target_dir, model) -> dict:
     for key in predictions.keys():
         if isinstance(predictions[key], torch.Tensor):
             predictions[key] = predictions[key].cpu().numpy().squeeze(0)  # remove batch dimension
-    predictions['pose_enc_list'] = None # remove pose_enc_list
+    predictions['pose_enc_list'] = None  # remove pose_enc_list
 
     # Generate world points from depth map
     print("Computing world points from depth map...")
@@ -394,8 +394,7 @@ with gr.Blocks(
     is_example = gr.Textbox(label="is_example", visible=False, value="None")
     num_images = gr.Textbox(label="num_images", visible=False, value="None")
 
-    gr.HTML(
-        """
+    gr.HTML("""
     <h1>🏛️ VGGT: Visual Geometry Grounded Transformer</h1>
     <p>
     <a href="https://github.com/facebookresearch/vggt">🐙 GitHub Repository</a> |
@@ -428,8 +427,7 @@ with gr.Blocks(
     </ol>
     <p><strong style="color: #0ea5e9;">Please note:</strong> <span style="color: #0ea5e9; font-weight: bold;">VGGT typically reconstructs a scene in less than 1 second. However, visualizing 3D points may take tens of seconds due to third-party rendering, which are independent of VGGT's processing time. </span></p>
     </div>
-    """
-    )
+    """)
 
     target_dir_output = gr.Textbox(label="Target Dir", visible=False, value="None")
 

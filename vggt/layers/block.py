@@ -20,7 +20,6 @@ from .drop_path import DropPath
 from .layer_scale import LayerScale
 from .mlp import Mlp
 
-
 XFORMERS_AVAILABLE = False
 
 

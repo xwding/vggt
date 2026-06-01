@@ -42,9 +42,7 @@ class TensorBoardLogger:
         _, self._rank = get_machine_local_and_dist_rank()
         self._path: str = path
         if self._rank == 0:
-            logging.info(
-                f"TensorBoard SummaryWriter instantiated. Files will be stored in: {path}"
-            )
+            logging.info(f"TensorBoard SummaryWriter instantiated. Files will be stored in: {path}")
             self._writer = summary_writer_method(
                 log_dir=path,
                 *args,
@@ -52,9 +50,7 @@ class TensorBoardLogger:
                 **kwargs,
             )
         else:
-            logging.debug(
-                f"Not logging on this process because rank {self._rank} != 0"
-            )
+            logging.debug(f"Not logging on this process because rank {self._rank} != 0")
 
         atexit.register(self.close)
 
@@ -108,13 +104,7 @@ class TensorBoardLogger:
 
         self._writer.add_scalar(name, data, global_step=step, new_style=True)
 
-    def log_visuals(
-        self,
-        name: str,
-        data: Union[torch.Tensor, Any],
-        step: int,
-        fps: int = 4
-    ) -> None:
+    def log_visuals(self, name: str, data: Union[torch.Tensor, Any], step: int, fps: int = 4) -> None:
         """Log image or video data to TensorBoard.
 
         Args:
@@ -134,7 +124,4 @@ class TensorBoardLogger:
         elif data.ndim == 5:
             self._writer.add_video(name, data, global_step=step, fps=fps)
         else:
-            raise ValueError(
-                f"Unsupported data dimensions: {data.ndim}. "
-                "Expected 3D for images or 5D for videos."
-            )
+            raise ValueError(f"Unsupported data dimensions: {data.ndim}. " "Expected 3D for images or 5D for videos.")

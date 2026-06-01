@@ -9,9 +9,7 @@ from torchvision import transforms
 
 
 def get_image_augmentation(
-    color_jitter: Optional[Dict[str, float]] = None,
-    gray_scale: bool = True,
-    gau_blur: bool = False
+    color_jitter: Optional[Dict[str, float]] = None, gray_scale: bool = True, gau_blur: bool = False
 ) -> Optional[transforms.Compose]:
     """Create a composition of image augmentations.
 
@@ -30,13 +28,7 @@ def get_image_augmentation(
         A Compose object of transforms or None if no transforms are added
     """
     transform_list = []
-    default_jitter = {
-        "brightness": 0.5,
-        "contrast": 0.5,
-        "saturation": 0.5,
-        "hue": 0.1,
-        "p": 0.9
-    }
+    default_jitter = {"brightness": 0.5, "contrast": 0.5, "saturation": 0.5, "hue": 0.1, "p": 0.9}
 
     # Handle color jitter
     if color_jitter is not None:
@@ -63,10 +55,6 @@ def get_image_augmentation(
         transform_list.append(transforms.RandomGrayscale(p=0.05))
 
     if gau_blur:
-        transform_list.append(
-            transforms.RandomApply(
-                [transforms.GaussianBlur(5, sigma=(0.1, 1.0))], p=0.05
-            )
-        )
+        transform_list.append(transforms.RandomApply([transforms.GaussianBlur(5, sigma=(0.1, 1.0))], p=0.05))
 
     return transforms.Compose(transform_list) if transform_list else None

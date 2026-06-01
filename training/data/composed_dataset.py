@@ -27,6 +27,7 @@ class ComposedDataset(Dataset, ABC):
     It handles image normalization, tensor conversion, and other preparations
     needed for training computer vision models with sequences of images.
     """
+
     def __init__(self, dataset_configs: dict, common_config: dict, **kwargs):
         """
         Initializes the ComposedDataset.
@@ -81,7 +82,6 @@ class ComposedDataset(Dataset, ABC):
         """Returns the total number of sequences in the dataset."""
         return self.total_samples
 
-
     def __getitem__(self, idx_tuple):
         """
         Retrieves a data sample (sequence) from the dataset.
@@ -108,7 +108,7 @@ class ComposedDataset(Dataset, ABC):
         # Convert numpy arrays to tensors
         images = torch.from_numpy(np.stack(batch["images"]).astype(np.float32)).contiguous()
         # Normalize images from [0, 255] to [0, 1]
-        images = images.permute(0,3,1,2).to(torch.get_default_dtype()).div(255)
+        images = images.permute(0, 3, 1, 2).to(torch.get_default_dtype()).div(255)
 
         # Convert other data to tensors with appropriate types
         depths = torch.from_numpy(np.stack(batch["depths"]).astype(np.float32))
@@ -116,9 +116,10 @@ class ComposedDataset(Dataset, ABC):
         intrinsics = torch.from_numpy(np.stack(batch["intrinsics"]).astype(np.float32))
         cam_points = torch.from_numpy(np.stack(batch["cam_points"]).astype(np.float32))
         world_points = torch.from_numpy(np.stack(batch["world_points"]).astype(np.float32))
-        point_masks = torch.from_numpy(np.stack(batch["point_masks"])) # Mask indicating valid depths / world points / cam points per frame
-        ids = torch.from_numpy(batch["ids"])    # Frame indices sampled from the original sequence
-
+        point_masks = torch.from_numpy(
+            np.stack(batch["point_masks"])
+        )  # Mask indicating valid depths / world points / cam points per frame
+        ids = torch.from_numpy(batch["ids"])  # Frame indices sampled from the original sequence
 
         # --- Apply Color Augmentation (training mode only) ---
         if self.training and self.image_aug is not None:
@@ -129,7 +130,6 @@ class ComposedDataset(Dataset, ABC):
                 # Apply different color jittering to each frame individually
                 for aug_img_idx in range(len(images)):
                     images[aug_img_idx] = self.image_aug(images[aug_img_idx])
-
 
         # --- Prepare Final Sample Dictionary ---
         sample = {
@@ -155,13 +155,14 @@ class ComposedDataset(Dataset, ABC):
                 valid_indices = torch.where(track_vis_mask[0])[0]
                 if len(valid_indices) >= self.track_num:
                     # If we have enough tracks, sample without replacement
-                    sampled_indices = valid_indices[torch.randperm(len(valid_indices))][:self.track_num]
+                    sampled_indices = valid_indices[torch.randperm(len(valid_indices))][: self.track_num]
                 else:
                     # If not enough tracks, sample with replacement (allow duplicates)
-                    sampled_indices = valid_indices[torch.randint(0, len(valid_indices),
-                                                    (self.track_num,),
-                                                    dtype=torch.int64,
-                                                    device=valid_indices.device)]
+                    sampled_indices = valid_indices[
+                        torch.randint(
+                            0, len(valid_indices), (self.track_num,), dtype=torch.int64, device=valid_indices.device
+                        )
+                    ]
 
                 # Extract the sampled tracks and their masks
                 tracks = tracks[:, sampled_indices, :]
@@ -172,8 +173,14 @@ class ComposedDataset(Dataset, ABC):
                 # Generate tracks on-the-fly using depth information
                 # This creates synthetic tracks based on the 3D information available
                 tracks, track_vis_mask, track_positive_mask = build_tracks_by_depth(
-                    extrinsics, intrinsics, world_points, depths, point_masks, images,
-                    target_track_num=self.track_num, seq_name=seq_name
+                    extrinsics,
+                    intrinsics,
+                    world_points,
+                    depths,
+                    point_masks,
+                    images,
+                    target_track_num=self.track_num,
+                    seq_name=seq_name,
                 )
 
             # Add track information to the sample dictionary
@@ -198,6 +205,7 @@ class TupleConcatDataset(ConcatDataset):
     might cause memory issues due to duplicating dictionaries. If doing this, you can
     set pytorch's dataloader shuffle to False.
     """
+
     def __init__(self, datasets, common_config):
         """
         Initialize the TupleConcatDataset.
@@ -239,9 +247,7 @@ class TupleConcatDataset(ConcatDataset):
         # Handle negative indices
         if idx < 0:
             if -idx > len(self):
-                raise ValueError(
-                    "absolute value of index should not exceed dataset length"
-                )
+                raise ValueError("absolute value of index should not exceed dataset length")
             idx = len(self) + idx
 
         # Find which dataset the index belongs to

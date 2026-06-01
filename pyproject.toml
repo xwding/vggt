@@ -50,3 +50,9 @@ default = { solve-group = "default" }
 demo = { features = ["demo"], solve-group = "default" }
 
 [tool.pixi.tasks]
+
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+skip-string-normalization = true
