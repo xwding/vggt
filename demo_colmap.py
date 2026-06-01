@@ -29,7 +29,10 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
 from vggt.dependency.track_predict import predict_tracks
-from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
+from vggt.dependency.np_to_pycolmap import (
+    batch_np_matrix_to_pycolmap,
+    batch_np_matrix_to_pycolmap_wo_track,
+)
 
 # TODO: add support for masks
 # TODO: add iterative BA
@@ -40,25 +43,75 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument(
+        "--scene_dir",
+        type=str,
+        required=True,
+        help="Directory containing the scene images",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument(
+        "--checkout",
+        type=str,
+        default="latest",
+        help="Checkpoint to load for the model",
+    )
+    parser.add_argument(
+        "--gpu_id",
+        type=int,
+        default=0,
+        help="Physical GPU index to use when CUDA is available (e.g. 0, 1, 2)",
+    )
     parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
     ######### BA parameters #########
     parser.add_argument(
-        "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
+        "--max_reproj_error",
+        type=float,
+        default=8.0,
+        help="Maximum reprojection error for reconstruction",
     )
-    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
-    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    parser.add_argument(
+        "--shared_camera",
+        action="store_true",
+        default=False,
+        help="Use shared camera for all images",
+    )
+    parser.add_argument(
+        "--camera_type",
+        type=str,
+        default="SIMPLE_PINHOLE",
+        help="Camera type for reconstruction",
+    )
     parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
     parser.add_argument("--query_frame_num", type=int, default=8, help="Number of frames to query")
     parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
     parser.add_argument(
-        "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
+        "--fine_tracking",
+        action="store_true",
+        default=True,
+        help="Use fine tracking (slower but more accurate)",
     )
     parser.add_argument(
-        "--conf_thres_value", type=float, default=5.0, help="Confidence threshold value for depth filtering (wo BA)"
+        "--conf_thres_value",
+        type=float,
+        default=5.0,
+        help="Confidence threshold value for depth filtering (wo BA)",
     )
     return parser.parse_args()
+
+
+def resolve_device(gpu_id):
+    if not torch.cuda.is_available():
+        return torch.device("cpu"), torch.float32
+
+    gpu_count = torch.cuda.device_count()
+    if gpu_id < 0 or gpu_id >= gpu_count:
+        raise ValueError(f"Invalid --gpu_id={gpu_id}. Available GPU ids are 0 to {gpu_count - 1}.")
+
+    device = torch.device(f"cuda:{gpu_id}")
+    major, _ = torch.cuda.get_device_capability(device)
+    dtype = torch.bfloat16 if major >= 8 else torch.float16
+    return device, dtype
 
 
 def run_VGGT(model, images, dtype, resolution=518):
@@ -79,6 +132,8 @@ def run_VGGT(model, images, dtype, resolution=518):
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
         # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
         extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
+        assert extrinsic is not None
+        assert intrinsic is not None
         # Predict Depth Maps
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
 
@@ -87,6 +142,18 @@ def run_VGGT(model, images, dtype, resolution=518):
     depth_map = depth_map.squeeze(0).cpu().numpy()
     depth_conf = depth_conf.squeeze(0).cpu().numpy()
     return extrinsic, intrinsic, depth_map, depth_conf
+
+
+def load_model(checkpoint_path: str) -> VGGT:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required to run VGGT-Omega.")
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    model = VGGT().eval()
+    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(state_dict)
+    return model.to("cuda")
 
 
 def demo_fn(args):
@@ -103,15 +170,18 @@ def demo_fn(args):
     print(f"Setting seed as: {args.seed}")
 
     # Set device and dtype
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device, dtype = resolve_device(args.gpu_id)
     print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"Using GPU #{args.gpu_id}: {torch.cuda.get_device_name(device)}")
     print(f"Using dtype: {dtype}")
 
     # Run VGGT for camera and depth estimation
     model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model = load_model(args.checkout)
+    # _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    # model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+
     model.eval()
     model = model.to(device)
     print(f"Model loaded")
@@ -200,7 +270,10 @@ def demo_fn(args):
         num_frames, height, width, _ = points_3d.shape
 
         points_rgb = F.interpolate(
-            images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
+            images,
+            size=(vggt_fixed_resolution, vggt_fixed_resolution),
+            mode="bilinear",
+            align_corners=False,
         )
         points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
         points_rgb = points_rgb.transpose(0, 2, 3, 1)
@@ -251,7 +324,12 @@ def demo_fn(args):
 
 
 def rename_colmap_recons_and_rescale_camera(
-    reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
+    reconstruction,
+    image_paths,
+    original_coords,
+    img_size,
+    shift_point2d_to_original_res=False,
+    shared_camera=False,
 ):
     rescale_camera = True
 
@@ -261,13 +339,13 @@ def rename_colmap_recons_and_rescale_camera(
         pyimage = reconstruction.images[pyimageid]
         pycamera = reconstruction.cameras[pyimage.camera_id]
         pyimage.name = image_paths[pyimageid - 1]
+        real_image_size = original_coords[pyimageid - 1, -2:]
+        resize_ratio = max(real_image_size) / img_size
 
         if rescale_camera:
             # Rescale the camera parameters
             pred_params = copy.deepcopy(pycamera.params)
 
-            real_image_size = original_coords[pyimageid - 1, -2:]
-            resize_ratio = max(real_image_size) / img_size
             pred_params = pred_params * resize_ratio
             real_pp = real_image_size / 2
             pred_params[-2:] = real_pp  # center of the image

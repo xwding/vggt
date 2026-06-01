@@ -8,7 +8,7 @@ import os
 
 # --- Environment Variable Setup for Performance and Debugging ---
 # Helps with memory fragmentation in PyTorch's memory allocator.
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # Specifies the threading layer for MKL, can prevent hangs in some environments.
 os.environ["MKL_THREADING_LAYER"] = "GNU"
 # Provides full Hydra stack traces on error for easier debugging.
@@ -26,12 +26,14 @@ import time
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torchvision
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
+from PIL import Image, ImageDraw
 
 from train_utils.checkpoint import DDPCheckpointSaver
 from train_utils.distributed import get_machine_local_and_dist_rank
@@ -40,6 +42,7 @@ from train_utils.general import *
 from train_utils.logging import setup_logging
 from train_utils.normalization import normalize_camera_extrinsics_and_points_batch
 from train_utils.optimizer import construct_optimizers
+from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 
 class Trainer:
@@ -189,7 +192,8 @@ class Trainer:
 
         # Initialize the DDP process group
         dist.init_process_group(
-            backend=distributed_conf.backend, timeout=timedelta(minutes=distributed_conf.timeout_mins)
+            backend=distributed_conf.backend,
+            timeout=timedelta(minutes=distributed_conf.timeout_mins),
         )
         self.rank = dist.get_rank()
 
@@ -202,11 +206,27 @@ class Trainer:
 
         # Load model state
         model_state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
+        load_only_model_prefixes = self.checkpoint_conf.get("load_only_model_prefixes", None)
+        if load_only_model_prefixes:
+            load_only_model_prefixes = tuple(load_only_model_prefixes)
+            original_key_count = len(model_state_dict)
+            model_state_dict = {k: v for k, v in model_state_dict.items() if k.startswith(load_only_model_prefixes)}
+            logging.info(
+                "Loading only model keys with prefixes %s: %d / %d keys kept.",
+                load_only_model_prefixes,
+                len(model_state_dict),
+                original_key_count,
+            )
+
         missing, unexpected = self.model.load_state_dict(model_state_dict, strict=self.checkpoint_conf.strict)
         if self.rank == 0:
             logging.info(
                 f"Model state loaded. Missing keys: {missing or 'None'}. Unexpected keys: {unexpected or 'None'}."
             )
+
+        if load_only_model_prefixes and not self.checkpoint_conf.get("resume_training_state", False):
+            logging.info("Skipping optimizer, scaler, and training-progress state after partial model load.")
+            return
 
         # Load optimizer state if available and in training mode
         if "optimizer" in checkpoint:
@@ -238,7 +258,7 @@ class Trainer:
         """Initializes all core training components using Hydra configs."""
         logging.info("Setting up components: Model, Loss, Logger, etc.")
         self.epoch = 0
-        self.steps = {'train': 0, 'val': 0}
+        self.steps = {"train": 0, "val": 0}
 
         # Instantiate components from configs
         self.tb_writer = instantiate(self.logging_conf.tensorboard_writer, _recursive_=False)
@@ -274,7 +294,7 @@ class Trainer:
         self.val_dataset = None
 
         if self.mode in ["train", "val"]:
-            self.val_dataset = instantiate(self.data_conf.get('val', None), _recursive_=False)
+            self.val_dataset = instantiate(self.data_conf.get("val", None), _recursive_=False)
             if self.val_dataset is not None:
                 self.val_dataset.seed = self.seed_value
 
@@ -370,7 +390,11 @@ class Trainer:
     def run_train(self):
         """Runs the main training loop over all epochs."""
         while self.epoch < self.max_epochs:
-            set_seeds(self.seed_value + self.epoch * 100, self.max_epochs, self.distributed_rank)
+            set_seeds(
+                self.seed_value + self.epoch * 100,
+                self.max_epochs,
+                self.distributed_rank,
+            )
 
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
             self.train_epoch(dataloader)
@@ -413,7 +437,7 @@ class Trainer:
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
         data_times = []
-        phase = 'val'
+        phase = "val"
 
         loss_names = self._get_scalar_log_keys(phase)
         loss_names = [f"Loss/{phase}_{name}" for name in loss_names]
@@ -439,7 +463,7 @@ class Trainer:
         limit_val_batches = iters_per_epoch if self.limit_val_batches is None else self.limit_val_batches
 
         for data_iter, batch in enumerate(val_loader):
-            if data_iter > limit_val_batches:
+            if data_iter >= limit_val_batches:
                 break
 
             # measure data loading time
@@ -484,14 +508,14 @@ class Trainer:
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
         data_times = []
-        phase = 'train'
+        phase = "train"
 
         loss_names = self._get_scalar_log_keys(phase)
         loss_names = [f"Loss/{phase}_{name}" for name in loss_names]
         loss_meters = {name: AverageMeter(name, self.device, ":.4f") for name in loss_names}
 
         for config in self.gradient_clipper.configs:
-            param_names = ",".join(config['module_names'])
+            param_names = ",".join(config["module_names"])
             loss_meters[f"Grad/{param_names}"] = AverageMeter(f"Grad/{param_names}", self.device, ":.4f")
 
         progress = ProgressMeter(
@@ -518,32 +542,48 @@ class Trainer:
             self.gradient_clipper.setup_clipping(self.model)
 
         for data_iter, batch in enumerate(train_loader):
-            if data_iter > limit_train_batches:
+            # Step 1. 限制每个 epoch 的迭代数
+            if data_iter >= limit_train_batches:
                 break
 
             # measure data loading time
+            # Step 2. 统计数据加载时间 上一个 batch 结束到当前 batch 真正开始处理之间花了多少时间数据准备/加载耗时
             data_time.update(time.time() - end)
             data_times.append(data_time.val)
-
+            # Step 3. 对 batch 做预处理 关闭了 AMP 自动混合精度，用全精度执行
+            # 之所以禁用 AMP，通常是因为：
+            # 这些预处理操作更适合用 float32
+            # 几何归一化这类计算对数值稳定性比较敏感
             with torch.cuda.amp.autocast(enabled=False):
                 batch = self._process_batch(batch)
 
-            batch = copy_data_to_device(batch, self.device, non_blocking=True)
+            # Step 4. 把 batch 拷贝到设备上
+            batch = copy_data_to_device(
+                batch, self.device, non_blocking=True
+            )  # non_blocking=True 如果条件满足，可以异步拷贝，提高吞吐
 
+            # Step 5. 根据 accum_steps 把 batch 划分成若干个 chunk，每个 chunk 包含原 batch 的一部分数据。然后对每个 chunk 依次执行前向和反向传播，累积梯度。等所有 chunk 都处理完了，再执行一次优化器步骤来更新模型参数。
+            # 这样做的好处是：
+            # 显存不够时可以模拟更大的 batch size
+            # 例如总 batch=16 放不下，可以拆成 4 次，每次算 4 个样本
             accum_steps = self.accum_steps
 
             if accum_steps == 1:
                 chunked_batches = [batch]
             else:
                 chunked_batches = chunk_batch_for_accum_steps(batch, accum_steps)
-
+            # Step 6. 对每个 chunk 做前向和反向
             self._run_steps_on_batch_chunks(chunked_batches, phase, loss_meters)
 
             # compute gradient and do SGD step
+            # Step 7. 计算当前训练进度 self.where，更新学习率调度器
             assert data_iter <= limit_train_batches  # allow for off by one errors
+            # 比如 epoch=3，当前 batch 在本轮 50% 位置，那就是 3.5
             exact_epoch = self.epoch + float(data_iter) / limit_train_batches
-            self.where = float(exact_epoch) / self.max_epochs
+            # 比如总共 10 个 epoch，那么 3.5 / 10 = 0.35
+            self.where = float(exact_epoch) / self.max_epochs  # where = 0.0 表示训练刚开始 where = 1.0 表示训练结束
 
+            # Step 8. 根据当前训练进度更新 scheduler。
             assert self.where <= 1 + self.EPSILON
             if self.where < 1.0:
                 for optim in self.optims:
@@ -554,6 +594,7 @@ class Trainer:
                 )
 
             # Log schedulers
+            # Step 9. 记录优化器和调度器参数到 TensorBoard
             if self.steps[phase] % self.logging_conf.log_freq == 0:
                 for i, optim in enumerate(self.optims):
                     for j, param_group in enumerate(optim.optimizer.param_groups):
@@ -574,7 +615,7 @@ class Trainer:
                     self.steps[phase],
                 )
 
-            # Clipping gradients and detecting diverging gradients
+            # Step 10. 梯度裁剪和梯度监控 Clipping gradients and detecting diverging gradients
             if self.gradient_clipper is not None:
                 for optim in self.optims:
                     self.scaler.unscale_(optim.optimizer)
@@ -584,17 +625,26 @@ class Trainer:
                 for key, grad_norm in grad_norm_dict.items():
                     loss_meters[f"Grad/{key}"].update(grad_norm)
 
-            # Optimizer step
+            # Step 11. 执行优化器更新 Optimizer step
+            # 这一步结束后： 模型参数被更新 本次训练 iteration 才算真正完成
             for optim in self.optims:
                 self.scaler.step(optim.optimizer)
             self.scaler.update()
 
-            # Measure elapsed time
+            # Step 12. Measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
             self.time_elapsed_meter.update(time.time() - self.start_time + self.ckpt_time_elapsed)
             mem.update(torch.cuda.max_memory_allocated() // 1e9)
-
+            # 按设定频率输出训练日志，通常会显示：
+            # 当前 epoch / iter
+            # batch time
+            # data time
+            # 显存
+            # loss
+            # grad norm
+            # 总耗时
+            # 这就是终端里训练时看到的那类进度条/统计信息。
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
@@ -602,47 +652,68 @@ class Trainer:
 
     def _run_steps_on_batch_chunks(
         self,
-        chunked_batches: List[Any],
-        phase: str,
-        loss_meters: Dict[str, AverageMeter],
+        chunked_batches: List[Any],  # 一个列表，里面每个元素是一个小 batch
+        phase: str,  # 当前阶段，比如 "train" 或 "val"
+        loss_meters: Dict[str, AverageMeter],  # 用来记录 loss、梯度等统计信息的计量器
     ):
+        """
+        把一个大 batch 拆成多个小 batch，每个小 batch 单独前向/反向，前几个 chunk 在 DDP 下不做梯度同步，最后一个 chunk 再同步，从而实现节省显存的梯度累积训练。
+        """
+
         """
         Run the forward / backward as many times as there are chunks in the batch,
         accumulating the gradients on each backward
         """
-
+        # Step 1. 先清空旧梯度,直接把梯度置为 None 可以让 PyTorch 在下一次反向传播时分配新的内存，减少内存碎片化，提高性能。
         for optim in self.optims:
             optim.zero_grad(set_to_none=True)
 
+        # 比如：
+        # 原 batch size = 16
+        # 拆成 4 个 chunk
+        # 那么 accum_steps = 4
         accum_steps = len(chunked_batches)
 
+        # Step 2. 设置自动混合精度 (AMP) 类型
         amp_type = self.optim_conf.amp.amp_dtype
         assert amp_type in ["bfloat16", "float16"], f"Invalid Amp type: {amp_type}"
         if amp_type == "bfloat16":
             amp_type = torch.bfloat16
         else:
             amp_type = torch.float16
-
+        # Step 3. 对每个 chunk 做前向和反向传播，累积梯度
         for i, chunked_batch in enumerate(chunked_batches):
+            # Step 4. 在 DDP 下决定要不要同步梯度
+            # 所以这里的策略是：
+            # 前 accum_steps - 1 个 chunk：用 no_sync()
+            # 只做本地 backward
+            # 不做分布式梯度同步
+            # 最后一个 chunk：不用 no_sync()
+            # 正常 backward
+            # 这时才真正触发 DDP 梯度同步
             ddp_context = self.model.no_sync() if i < accum_steps - 1 else contextlib.nullcontext()
 
-            with ddp_context:
+            with ddp_context:  # 外层 控制是否进行 DDP 梯度同步。
                 with torch.cuda.amp.autocast(
                     enabled=self.optim_conf.amp.enabled,
                     dtype=amp_type,
-                ):
+                ):  # 内层 控制是否启用 AMP 以及使用哪种精度。
                     loss_dict = self._step(chunked_batch, self.model, phase, loss_meters)
 
                 loss = loss_dict["objective"]
-                loss_key = f"Loss/{phase}_loss_objective"
-                batch_size = chunked_batch["images"].shape[0]
-
-                if not math.isfinite(loss.item()):
+                loss_key = f"Loss/{phase}_loss_objective"  # 构造日志名
+                batch_size = chunked_batch["images"].shape[0]  # 当前这个 chunk 的样本数
+                # 检查 loss 是否正常
+                if not math.isfinite(loss.item()):  # nan  inf -inf 都不正常
                     error_msg = f"Loss is {loss.item()}, attempting to stop training"
                     logging.error(error_msg)
                     return
-
+                # !为什么必须除？假设原始大 batch 被拆成 4 个 chunk，如果每个 chunk 都直接 backward 原始 loss，那么最终累积出来的总梯度会变成原来的 4 倍。
                 loss /= accum_steps
+                # 用 GradScaler 放大 loss 再反向传播    AMP 训练里的标准写法
+                # 为什么要 scale(loss)？
+                # 因为在 float16 下，小梯度可能会下溢成 0。
+                # GradScaler 会先把 loss 放大，再做 backward，从而让梯度数值更稳定。
                 self.scaler.scale(loss).backward()
                 loss_meters[loss_key].update(loss.item(), batch_size)
 
@@ -673,19 +744,93 @@ class Trainer:
 
         return batch
 
+    def _cache_physical_metric_targets(self, batch: Mapping) -> Mapping:
+        """Caches raw GT targets and normalization metadata for physical-unit logging."""
+        if "extrinsics" in batch:
+            batch["metric_raw_extrinsics"] = batch["extrinsics"].clone()
+
+        if "depths" in batch:
+            batch["metric_raw_depths"] = batch["depths"].clone()
+
+        if all(key in batch for key in ["extrinsics", "world_points", "point_masks"]):
+            ref_extrinsics = batch["extrinsics"][:, 0].clone()
+            batch["metric_ref_extrinsics"] = ref_extrinsics
+
+            world_points = batch["world_points"]
+            point_masks = batch["point_masks"].float()
+            rotation = ref_extrinsics[:, :3, :3]
+            translation = ref_extrinsics[:, :3, 3]
+
+            transformed_world_points = (
+                world_points @ rotation.transpose(-1, -2).unsqueeze(1).unsqueeze(2)
+            ) + translation.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+
+            distances = transformed_world_points.norm(dim=-1)
+            distance_sum = (distances * point_masks).sum(dim=[1, 2, 3])
+            valid_count = point_masks.sum(dim=[1, 2, 3])
+            avg_scale = (distance_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)
+            batch["metric_avg_scale"] = avg_scale
+
+        return batch
+
+    def _recover_physical_depths(
+        self, pred_depth: torch.Tensor, data: Mapping
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """Recovers predicted and GT depths in physical units for logging."""
+        if not all(key in data for key in ["metric_avg_scale", "metric_raw_depths", "depth"]):
+            return None
+
+        scale = data["metric_avg_scale"].view(-1, 1, 1, 1)
+        pred_depth_physical = pred_depth * scale
+        gt_depth_physical = data["metric_raw_depths"].detach()
+        return pred_depth_physical, gt_depth_physical
+
+    def _recover_physical_extrinsics(self, pred_extrinsics: torch.Tensor, data: Mapping) -> Optional[torch.Tensor]:
+        """Recovers predicted extrinsics from normalized coordinates back to raw scene coordinates."""
+        if not all(
+            key in data
+            for key in [
+                "metric_avg_scale",
+                "metric_ref_extrinsics",
+                "metric_raw_extrinsics",
+            ]
+        ):
+            return None
+
+        scale = data["metric_avg_scale"].view(-1, 1, 1)
+        ref_extrinsics = data["metric_ref_extrinsics"].detach()
+
+        pred_rotation_rel = pred_extrinsics[..., :3, :3]
+        pred_translation_rel = pred_extrinsics[..., :3, 3] * scale
+
+        ref_rotation = ref_extrinsics[:, None, :3, :3]
+        ref_translation = ref_extrinsics[:, None, :3, 3]
+
+        pred_rotation_abs = torch.matmul(pred_rotation_rel, ref_rotation)
+        pred_translation_abs = (
+            torch.matmul(pred_rotation_rel, ref_translation.unsqueeze(-1)).squeeze(-1) + pred_translation_rel
+        )
+
+        return torch.cat([pred_rotation_abs, pred_translation_abs.unsqueeze(-1)], dim=-1)
+
     def _process_batch(self, batch: Mapping):
         if self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
 
+        batch = self._cache_physical_metric_targets(batch)
+
         # Normalize camera extrinsics and points. The function returns new tensors.
-        normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = (
-            normalize_camera_extrinsics_and_points_batch(
-                extrinsics=batch["extrinsics"],
-                cam_points=batch["cam_points"],
-                world_points=batch["world_points"],
-                depths=batch["depths"],
-                point_masks=batch["point_masks"],
-            )
+        (
+            normalized_extrinsics,
+            normalized_cam_points,
+            normalized_world_points,
+            normalized_depths,
+        ) = normalize_camera_extrinsics_and_points_batch(
+            extrinsics=batch["extrinsics"],
+            cam_points=batch["cam_points"],
+            world_points=batch["world_points"],
+            depths=batch["depths"],
+            point_masks=batch["point_masks"],
         )
 
         # Replace the original values in the batch with the normalized ones.
@@ -703,13 +848,13 @@ class Trainer:
         Returns:
             A dictionary containing the computed losses.
         """
-        # Forward pass
+        # Forward pass① 前向传播
         y_hat = model(images=batch["images"])
 
-        # Loss computation
+        # Loss computation ② 计算 loss
         loss_dict = self.loss(y_hat, batch)
 
-        # Combine all data for logging
+        # Combine all data for logging ③ 记录标量和可视化
         log_data = {**y_hat, **loss_dict, **batch}
 
         self._update_and_log_scalars(log_data, phase, self.steps[phase], loss_meters)
@@ -718,58 +863,288 @@ class Trainer:
         self.steps[phase] += 1
         return loss_dict
 
+    def _get_visual_frequency(self, phase: str) -> int:
+        """Returns the TensorBoard visual logging frequency for the given phase."""
+        visual_freq = getattr(self.logging_conf, "log_visual_frequency", None)
+        if visual_freq is None:
+            return 0
+
+        if isinstance(visual_freq, Mapping):
+            return int(visual_freq.get(phase, 0))
+
+        if hasattr(visual_freq, phase):
+            return int(getattr(visual_freq, phase))
+
+        return 0
+
+    def _robust_normalize_map(
+        self,
+        value_map: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+        lower_q: float = 0.05,
+        upper_q: float = 0.95,
+    ) -> torch.Tensor:
+        """Normalizes a 2D scalar map to [0, 1] using robust quantiles."""
+        value_map = value_map.detach().float()
+        if valid_mask is not None:
+            valid_mask = valid_mask.detach().bool()
+            valid_values = value_map[valid_mask]
+        else:
+            valid_values = value_map.reshape(-1)
+
+        valid_values = valid_values[torch.isfinite(valid_values)]
+        if valid_values.numel() == 0:
+            return torch.zeros_like(value_map)
+
+        if valid_values.numel() == 1:
+            normalized = torch.zeros_like(value_map)
+        else:
+            lo = torch.quantile(valid_values, lower_q)
+            hi = torch.quantile(valid_values, upper_q)
+            if not torch.isfinite(lo):
+                lo = valid_values.min()
+            if not torch.isfinite(hi):
+                hi = valid_values.max()
+            if (hi - lo).abs() < self.EPSILON:
+                hi = lo + 1.0
+            normalized = ((value_map - lo) / (hi - lo + self.EPSILON)).clamp(0.0, 1.0)
+
+        if valid_mask is not None:
+            normalized = torch.where(valid_mask, normalized, torch.zeros_like(normalized))
+        return normalized
+
+    def _scalar_map_to_rgb(
+        self,
+        value_map: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Converts a scalar map into a simple RGB heatmap for TensorBoard."""
+        normalized = self._robust_normalize_map(value_map, valid_mask=valid_mask)
+        red = normalized
+        green = (1.0 - (2.0 * normalized - 1.0).abs()).clamp(0.0, 1.0)
+        blue = 1.0 - normalized
+        rgb = torch.stack([red, green, blue], dim=0)
+
+        if valid_mask is not None:
+            valid_mask = valid_mask.detach().bool().unsqueeze(0)
+            rgb = torch.where(valid_mask, rgb, torch.zeros_like(rgb))
+        return rgb.clamp(0.0, 1.0)
+
+    def _compute_depth_error_statistics(
+        self,
+        pred_depth: torch.Tensor,
+        gt_depth: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> Optional[Dict[str, float]]:
+        """Computes summary statistics for valid depth differences."""
+        valid_diff = (pred_depth - gt_depth)[valid_mask]
+        valid_diff = valid_diff[torch.isfinite(valid_diff)]
+
+        if valid_diff.numel() == 0:
+            return None
+
+        abs_diff = valid_diff.abs()
+        return {
+            "mean": valid_diff.mean().item(),
+            "std": valid_diff.std(unbiased=False).item(),
+            "min": valid_diff.min().item(),
+            "max": valid_diff.max().item(),
+            "mae": abs_diff.mean().item(),
+        }
+
+    def _append_text_panel_to_grid(
+        self,
+        image_grid: torch.Tensor,
+        text_lines: Sequence[str],
+    ) -> torch.Tensor:
+        """Appends a text panel with summary lines below an image grid."""
+        if len(text_lines) == 0:
+            return image_grid
+
+        image_grid = image_grid.detach().float().cpu().clamp(0.0, 1.0)
+        height, width = image_grid.shape[1], image_grid.shape[2]
+
+        line_height = 18
+        top_bottom_padding = 12
+        text_panel_height = max(48, top_bottom_padding * 2 + line_height * len(text_lines))
+
+        panel_image = Image.new("RGB", (width, text_panel_height), color=(18, 18, 18))
+        drawer = ImageDraw.Draw(panel_image)
+
+        y_offset = top_bottom_padding
+        for line in text_lines:
+            drawer.text((12, y_offset), line, fill=(240, 240, 240))
+            y_offset += line_height
+
+        panel_array = np.asarray(panel_image).astype(np.float32) / 255.0
+        panel_tensor = torch.from_numpy(panel_array).permute(2, 0, 1)
+
+        return torch.cat([image_grid, panel_tensor], dim=1)
+
+    def _log_derived_visual_scalars(self, data: Mapping, phase: str, step: int) -> None:
+        """Logs additional scalar metrics derived from predictions for easier inspection."""
+        if self.rank != 0 or step % self.logging_conf.log_freq != 0:
+            return
+
+        if "depth" in data and "depths" in data and "point_masks" in data:
+            pred_depth = data["depth"].detach()[..., 0]
+            recovered_depths = self._recover_physical_depths(pred_depth, data)
+            if recovered_depths is not None:
+                pred_depth, gt_depth = recovered_depths
+            else:
+                gt_depth = data["depths"].detach()
+            valid_mask = data["point_masks"].detach().bool()
+            valid_depth_error = (pred_depth - gt_depth).abs()[valid_mask]
+            valid_depth_error = valid_depth_error[torch.isfinite(valid_depth_error)]
+            if valid_depth_error.numel() > 0:
+                self.tb_writer.log(
+                    f"Metrics/{phase}/depth_abs_error_mean",
+                    valid_depth_error.mean().item(),
+                    step,
+                )
+
+        if "pose_enc" in data and "extrinsics" in data:
+            pred_extrinsics, _ = pose_encoding_to_extri_intri(
+                data["pose_enc"].detach(),
+                image_size_hw=data["images"].shape[-2:],
+            )
+            recovered_extrinsics = self._recover_physical_extrinsics(pred_extrinsics, data)
+            if recovered_extrinsics is not None:
+                pred_extrinsics = recovered_extrinsics
+                gt_extrinsics = data["metric_raw_extrinsics"].detach()
+            else:
+                gt_extrinsics = data["extrinsics"].detach()
+
+            translation_error = torch.linalg.norm(
+                pred_extrinsics[..., :3, 3] - gt_extrinsics[..., :3, 3],
+                dim=-1,
+            )
+            translation_error = translation_error[torch.isfinite(translation_error)]
+            if translation_error.numel() > 0:
+                self.tb_writer.log(
+                    f"Metrics/{phase}/pose_translation_error_mean",
+                    translation_error.mean().item(),
+                    step,
+                )
+
     def _update_and_log_scalars(self, data: Mapping, phase: str, step: int, loss_meters: dict):
         """Updates average meters and logs scalar values to TensorBoard."""
         keys_to_log = self._get_scalar_log_keys(phase)
-        batch_size = data['extrinsics'].shape[0]
+        batch_size = data["extrinsics"].shape[0]
 
         for key in keys_to_log:
-            if key in data:
-                value = data[key].item() if torch.is_tensor(data[key]) else data[key]
+            lookup_key = "objective" if key == "loss_objective" and "objective" in data else key
+            if lookup_key in data:
+                value = data[lookup_key].item() if torch.is_tensor(data[lookup_key]) else data[lookup_key]
                 loss_meters[f"Loss/{phase}_{key}"].update(value, batch_size)
                 if step % self.logging_conf.log_freq == 0 and self.rank == 0:
                     self.tb_writer.log(f"Values/{phase}/{key}", value, step)
 
+        self._log_derived_visual_scalars(data, phase, step)
+
     def _log_tb_visuals(self, batch: Mapping, phase: str, step: int) -> None:
-        """Logs image or video visualizations to TensorBoard."""
-        if not (
-            self.logging_conf.log_visuals
-            and (phase in self.logging_conf.log_visual_frequency)
-            and self.logging_conf.log_visual_frequency[phase] > 0
-            and (step % self.logging_conf.log_visual_frequency[phase] == 0)
-            and (self.logging_conf.visuals_keys_to_log is not None)
-        ):
+        """Logs TensorBoard visualizations for RGB and depth comparison."""
+        visual_frequency = self._get_visual_frequency(phase)
+        if not self.logging_conf.log_visuals or visual_frequency <= 0 or step % visual_frequency != 0:
             return
 
-        if phase in self.logging_conf.visuals_keys_to_log:
-            keys_to_log = self.logging_conf.visuals_keys_to_log[phase]["keys_to_log"]
-            assert len(keys_to_log) > 0, "Need to include some visual keys to log"
-            modality = self.logging_conf.visuals_keys_to_log[phase]["modality"]
-            assert modality in [
-                "image",
-                "video",
-            ], "Currently only support video or image logging"
+        if self.rank != 0 or "images" not in batch:
+            return
+        # 控制batch的索引
+        # (B,S,C,H,W) 先选第 visual_batch_index 个样本，再选前 num_frames 帧来可视化
+        visual_batch_index = min(
+            int(getattr(self.logging_conf, "visual_batch_index", 0)),
+            batch["images"].shape[0] - 1,
+        )
+        # 控制每个 batch 里要可视化多少帧，序列长度
+        max_frames = max(1, int(getattr(self.logging_conf, "visual_max_frames", 4)))
+        num_frames = min(batch["images"].shape[1], max_frames)
 
-            name = f"Visuals/{phase}"
+        depth_panels = []
+        depth_stat_lines = []
+        include_rgb = bool(getattr(self.logging_conf, "visual_include_rgb", True))
+        include_depth = bool(getattr(self.logging_conf, "visual_include_depth", True))
 
-            visuals_to_log = torchvision.utils.make_grid(
-                [
-                    torchvision.utils.make_grid(
-                        batch[key][0],  # Ensure batch[key][0] is tensor and has at least 3 dimensions
-                        nrow=self.logging_conf.visuals_per_batch_to_log,
+        all_valid_depth_diffs = []
+
+        for frame_idx in range(num_frames):
+            frame_panels = []
+            rgb = batch["images"][visual_batch_index, frame_idx].detach().float().cpu().clamp(0.0, 1.0)
+            if include_rgb:
+                frame_panels.append(rgb)
+
+            if include_depth and all(key in batch for key in ["depth", "depths", "point_masks"]):
+                # batch["depth"] 是模型预测的深度 (B,S,H,W,1)
+                # batch["depths"] 是 GT 深度 (B,S,H,W,1)
+                pred_depth = batch["depth"][visual_batch_index, frame_idx, ..., 0].detach().float().cpu()
+                valid_mask = batch["point_masks"][visual_batch_index, frame_idx].detach().bool().cpu()
+
+                recovered_depths = self._recover_physical_depths(batch["depth"].detach()[..., 0], batch)
+                if recovered_depths is not None:
+                    pred_depth_all, gt_depth_all = recovered_depths
+                    pred_depth = pred_depth_all[visual_batch_index, frame_idx].detach().float().cpu()
+                    gt_depth = gt_depth_all[visual_batch_index, frame_idx].detach().float().cpu()
+                else:
+                    gt_depth = batch["depths"][visual_batch_index, frame_idx].detach().float().cpu()
+
+                depth_error = (pred_depth - gt_depth).abs()
+
+                depth_stats = self._compute_depth_error_statistics(
+                    pred_depth=pred_depth,
+                    gt_depth=gt_depth,
+                    valid_mask=valid_mask,
+                )
+                valid_diff = (pred_depth - gt_depth)[valid_mask]
+                valid_diff = valid_diff[torch.isfinite(valid_diff)]
+                if valid_diff.numel() > 0:
+                    all_valid_depth_diffs.append(valid_diff)
+
+                if depth_stats is not None:
+                    depth_stat_lines.append(
+                        "Frame {frame}: mean={mean:.4f}, std={std:.4f}, min={min:.4f}, max={max:.4f}, mae={mae:.4f}".format(
+                            frame=frame_idx,
+                            **depth_stats,
+                        )
                     )
-                    for key in keys_to_log
-                    if key in batch and batch[key][0].dim() >= 3
-                ],
-                nrow=1,
-            ).clamp(-1, 1)
+                else:
+                    depth_stat_lines.append(f"Frame {frame_idx}: no valid depth pixels for statistics")
 
-            visuals_to_log = visuals_to_log.cpu()
-            if visuals_to_log.dtype == torch.bfloat16:
-                visuals_to_log = visuals_to_log.to(torch.float16)
-            visuals_to_log = visuals_to_log.numpy()
+                frame_panels.extend(
+                    [
+                        self._scalar_map_to_rgb(gt_depth, valid_mask=valid_mask),
+                        self._scalar_map_to_rgb(pred_depth, valid_mask=valid_mask),
+                        self._scalar_map_to_rgb(depth_error, valid_mask=valid_mask),
+                    ]
+                )
 
-            self.tb_writer.log_visuals(name, visuals_to_log, step, self.logging_conf.video_logging_fps)
+            if frame_panels:
+                depth_panels.append(torchvision.utils.make_grid(frame_panels, nrow=len(frame_panels), padding=4))
+
+        if depth_panels:
+            depth_grid = torchvision.utils.make_grid(depth_panels, nrow=1, padding=8).clamp(0.0, 1.0)
+
+            if all_valid_depth_diffs:
+                combined_valid_diff = torch.cat(all_valid_depth_diffs, dim=0)
+                combined_stats = {
+                    "mean": combined_valid_diff.mean().item(),
+                    "std": combined_valid_diff.std(unbiased=False).item(),
+                    "min": combined_valid_diff.min().item(),
+                    "max": combined_valid_diff.max().item(),
+                    "mae": combined_valid_diff.abs().mean().item(),
+                }
+                depth_stat_lines.insert(
+                    0,
+                    "Overall: mean={mean:.4f}, std={std:.4f}, min={min:.4f}, max={max:.4f}, mae={mae:.4f}".format(
+                        **combined_stats
+                    ),
+                )
+
+            depth_grid = self._append_text_panel_to_grid(depth_grid, depth_stat_lines)
+            self.tb_writer.log_visuals(
+                f"Visuals/{phase}/depth_comparison",
+                depth_grid.numpy(),
+                step,
+            )
 
 
 def chunk_batch_for_accum_steps(batch: Mapping, accum_steps: int) -> List[Mapping]:

@@ -50,14 +50,14 @@ class Block(nn.Module):
 
         self.attn = attn_class(
             dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            proj_bias=proj_bias,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-            qk_norm=qk_norm,
-            fused_attn=fused_attn,
-            rope=rope,
+            num_heads=num_heads,  # 多头数
+            qkv_bias=qkv_bias,  # Q/K/V 线性层是否加 bias
+            proj_bias=proj_bias,  # 输出投影是否加 bias
+            attn_drop=attn_drop,  # attention 权重 dropout
+            proj_drop=drop,  # 输出 dropout
+            qk_norm=qk_norm,  # QK 是否归一化
+            fused_attn=fused_attn,  # 是否使用 F.scaled_dot_product_attention
+            rope=rope,  # 是否使用旋转位置编码
         )
 
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
@@ -66,7 +66,11 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, bias=ffn_bias
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+            bias=ffn_bias,
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -74,31 +78,58 @@ class Block(nn.Module):
         self.sample_drop_ratio = drop_path
 
     def forward(self, x: Tensor, pos=None) -> Tensor:
+        """
+        输入输出是什么样
+        输入
+        通常 shape 是：[B,N,C]
+        其中：B：batch  N：token 数    C：特征维度
+        在 Aggregator 里具体可能是：
+        frame attention: [B*S, P, C]
+        global attention: [B, S*P, C]
+        所以这个 Block 本身并不关心 token 到底来自“单帧”还是“多帧”，它只负责：
+        “给我一个 token 序列，我做一次 transformer 更新。”
+
+        输出 shape 跟输入一样：[B,N,C]
+        因为 attention 和 MLP 都是在 token 表示空间里做更新，不改变序列长度和通道维数。
+        """
+
+        # AttnBranch(x)=LayerScale(Attention(LayerNorm(x)))
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
             return self.ls1(self.attn(self.norm1(x), pos=pos))
 
+        # FFNBranch(x)=LayerScale(MLP(LayerNorm(x)))
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
 
         if self.training and self.sample_drop_ratio > 0.1:
             # the overhead is compensated only for a drop path rate larger than 0.1
             x = drop_add_residual_stochastic_depth(
-                x, pos=pos, residual_func=attn_residual_func, sample_drop_ratio=self.sample_drop_ratio
+                x,
+                pos=pos,
+                residual_func=attn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
             )
             x = drop_add_residual_stochastic_depth(
-                x, residual_func=ffn_residual_func, sample_drop_ratio=self.sample_drop_ratio
+                x,
+                residual_func=ffn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
             )
         elif self.training and self.sample_drop_ratio > 0.0:
             x = x + self.drop_path1(attn_residual_func(x, pos=pos))
             x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
         else:
+            # x←x+Attention(Norm(x))
             x = x + attn_residual_func(x, pos=pos)
+            # x←x+MLP(Norm(x))
             x = x + ffn_residual_func(x)
         return x
 
 
 def drop_add_residual_stochastic_depth(
-    x: Tensor, residual_func: Callable[[Tensor], Tensor], sample_drop_ratio: float = 0.0, pos=None
+    x: Tensor,
+    residual_func: Callable[[Tensor], Tensor],
+    sample_drop_ratio: float = 0.0,
+    pos=None,
 ) -> Tensor:
     # 1) extract subset using permutation
     b, n, d = x.shape
@@ -139,7 +170,11 @@ def add_residual(x, brange, residual, residual_scale_factor, scaling_vector=None
         x_plus_residual = torch.index_add(x_flat, 0, brange, residual.to(dtype=x.dtype), alpha=residual_scale_factor)
     else:
         x_plus_residual = scaled_index_add(
-            x, brange, residual.to(dtype=x.dtype), scaling=scaling_vector, alpha=residual_scale_factor
+            x,
+            brange,
+            residual.to(dtype=x.dtype),
+            scaling=scaling_vector,
+            alpha=residual_scale_factor,
         )
     return x_plus_residual
 

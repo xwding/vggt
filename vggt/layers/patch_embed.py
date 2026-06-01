@@ -1,3 +1,10 @@
+"""
+Name:
+Date: 2026-02-02 09:52:12
+Creator: ethan
+Description:
+"""
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the Apache License, Version 2.0
@@ -45,6 +52,8 @@ class PatchEmbed(nn.Module):
     ) -> None:
         super().__init__()
 
+        # img_size=224   -> (224, 224)
+        # patch_size=16  -> (16, 16)
         image_HW = make_2tuple(img_size)
         patch_HW = make_2tuple(patch_size)
         patch_grid_size = (image_HW[0] // patch_HW[0], image_HW[1] // patch_HW[1])
@@ -52,17 +61,29 @@ class PatchEmbed(nn.Module):
         self.img_size = image_HW
         self.patch_size = patch_HW
         self.patches_resolution = patch_grid_size
+        # 这表示整张图会被切成多少行、多少列的 patch。
         self.num_patches = patch_grid_size[0] * patch_grid_size[1]
 
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
         self.flatten_embedding = flatten_embedding
-
+        # !!这意味着卷积核每次正好跳一个 patch，不重叠。
+        # 同时，这个卷积还把每个 patch 从原始像素空间映射到 embed_dim 维特征空间。
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_HW, stride=patch_HW)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
+        """
+        (B,C,H,W)→(B,N,D)
+        它把图像拆成 patch，再把每个 patch 投影到特征空间，作为视觉 Transformer 的输入。
+
+                Args:
+                    x (Tensor): Input images with shape [B, C, H, W], in range [0, 1].
+
+                Returns:
+                    Tensor: Patch embeddings with shape [B, N, D]
+        """
         _, _, H, W = x.shape
         patch_H, patch_W = self.patch_size
 

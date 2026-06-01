@@ -14,6 +14,80 @@ import logging
 
 from vggt.utils.geometry import *
 
+_TRACK_VISUALIZATION_COUNT = 0
+
+
+def _is_track_visualization_enabled():
+    return os.getenv("VGGT_TRACK_VIS", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _sanitize_track_vis_name(name):
+    if not name:
+        return "unknown_seq"
+
+    return "".join(char if (char.isalnum() or char in {"-", "_", "."}) else "_" for char in str(name))
+
+
+def _maybe_visualize_tracks(images, tracks, track_vis_mask, track_pos_mask, seq_name=None):
+    global _TRACK_VISUALIZATION_COUNT
+
+    if not _is_track_visualization_enabled():
+        return
+
+    max_vis_count = int(os.getenv("VGGT_TRACK_VIS_LIMIT", "20"))
+    if _TRACK_VISUALIZATION_COUNT >= max_vis_count:
+        return
+
+    out_root = os.getenv("VGGT_TRACK_VIS_DIR", "track_visuals")
+    sample_name = _sanitize_track_vis_name(seq_name)
+    sample_dir = os.path.join(out_root, f"{_TRACK_VISUALIZATION_COUNT:04d}_{sample_name}")
+
+    images = images.detach()
+    tracks = tracks.detach()
+    track_vis_mask = track_vis_mask.detach().bool()
+    track_pos_mask = track_pos_mask.detach().bool()
+
+    all_track_vis_mask = track_vis_mask.clone()
+    if (~track_pos_mask).any():
+        all_track_vis_mask[:, ~track_pos_mask] = True
+
+    visualize_tracks_on_images(
+        images.unsqueeze(0),
+        tracks.unsqueeze(0),
+        track_vis_mask=all_track_vis_mask.unsqueeze(0),
+        out_dir=os.path.join(sample_dir, "all_tracks"),
+        image_format="CHW",
+        normalize_mode="[0,1]",
+    )
+
+    if track_pos_mask.any():
+        visualize_tracks_on_images(
+            images.unsqueeze(0),
+            tracks[:, track_pos_mask].unsqueeze(0),
+            track_vis_mask=track_vis_mask[:, track_pos_mask].unsqueeze(0),
+            out_dir=os.path.join(sample_dir, "positive_tracks"),
+            image_format="CHW",
+            normalize_mode="[0,1]",
+        )
+
+    if (~track_pos_mask).any():
+        negative_tracks = tracks[:, ~track_pos_mask]
+        negative_vis_mask = torch.ones(
+            negative_tracks.shape[:2],
+            device=negative_tracks.device,
+            dtype=torch.bool,
+        )
+        visualize_tracks_on_images(
+            images.unsqueeze(0),
+            negative_tracks.unsqueeze(0),
+            track_vis_mask=negative_vis_mask.unsqueeze(0),
+            out_dir=os.path.join(sample_dir, "negative_tracks"),
+            image_format="CHW",
+            normalize_mode="[0,1]",
+        )
+
+    _TRACK_VISUALIZATION_COUNT += 1
+
 
 def build_tracks_by_depth(
     extrinsics,
@@ -50,27 +124,31 @@ def build_tracks_by_depth(
         final_pos_masks: (P) bool, indicate if a mask is positive or negative
     """
     # Wait, should we do this before resizing the image?
-
+    # 一个 sample 是一段视频序列
     B, H, W, _ = world_points.shape
 
     # We use the first frame as the query frame, so [0]
+    # 取第0帧
     query_world_points = world_points[0]
     query_point_masks = point_masks[0]
 
     if (query_point_masks).sum() > 0:
         # at least one point
+        # Step 2.1 取出首帧中所有有效的 3D 世界点
         valid_query_points = query_world_points[query_point_masks]
 
-        # image_points: BxPx2
-        # cam_points: Bx3xP (yes 3xP instead of Px3). Probably we can change it in the future
+        # Step 2.2 把这些 3D 点投影到所有帧
+        # image_points: BxPx2 每个 3D 点在每一帧中的 2D 像素坐标 (u, v)
+        # cam_points: Bx3xP (yes 3xP instead of Px3). Probably we can change it in the future 点在各相机坐标系下的位置
         image_points, cam_points = project_world_points_to_cam(valid_query_points, extrinsics, intrinsics)
+        assert image_points is not None and cam_points is not None
 
         # proj_depths: BxP
-        proj_depths = cam_points[:, -1]
+        proj_depths = cam_points[:, -1]  # 取每个投影点在相机坐标系下的深度 z
 
         # floor to get the left top corner
         uv_int = image_points.floor().long().clone()
-
+        # Step 2.3 做边界检查
         uv_inside_flag = (
             (uv_int[..., 0] >= boundary_thres)
             & (uv_int[..., 0] < (W - boundary_thres))
@@ -78,30 +156,31 @@ def build_tracks_by_depth(
             & (uv_int[..., 1] < (H - boundary_thres))
         )
         uv_int[~uv_inside_flag] = 0
-        batch_indices = torch.arange(B).view(B, 1).expand(-1, uv_int.shape[1])
+        batch_indices = torch.arange(B, device=world_points.device).view(B, 1).expand(-1, uv_int.shape[1])
 
         # Use these indices to sample from the depth map
         # since we interpolate depths by nearest,
         # so assume the left top corner is (x, y)
         # we want to check for (x,y), (x+1,y), (x,y+1), (x+1,y+1)
-
+        # Step2.4 用深度一致性判断投影点是不是“真的可见”
         depth_inside_flag = None
         for shift in [(0, 0), (1, 0), (0, 1), (1, 1)]:
-            cur_uv_int = uv_int + torch.tensor(shift)
+            cur_uv_int = uv_int + uv_int.new_tensor(shift)
             cur_depth_inside_flag = get_depth_inside_flag(depths, batch_indices, cur_uv_int, proj_depths, pos_rel_thres)
             if depth_inside_flag is None:
                 depth_inside_flag = cur_depth_inside_flag
             else:
                 depth_inside_flag = torch.logical_or(depth_inside_flag, cur_depth_inside_flag)
+        assert depth_inside_flag is not None
 
         # B, P, 2
-        positive_tracks = image_points
-        positive_vis_masks = torch.logical_and(uv_inside_flag, depth_inside_flag)
+        positive_tracks = image_points  # 所有候选正轨迹的 2D 投影位置
+        positive_vis_masks = torch.logical_and(uv_inside_flag, depth_inside_flag)  # 这些轨迹在每帧里是否可见
     else:
         print(f"No valid query points in {seq_name}")
         positive_tracks = torch.zeros(B, target_track_num, 2, device=world_points.device, dtype=torch.float32)
         positive_vis_masks = torch.zeros(B, target_track_num, device=world_points.device, dtype=torch.bool)
-
+    # Step 4. 构造负样本轨迹
     sampled_neg_track_num = target_track_num * 4  # we sample more negative tracks to ensure the quality
 
     perb_range = [int(W * neg_sample_size_ratio), int(H * neg_sample_size_ratio)]
@@ -127,10 +206,11 @@ def build_tracks_by_depth(
     negative_tracks = negative_tracks[:, negative_epipolar_check]
 
     # Prepare for output
+    # Step 5. 准备最终输出张量
     final_tracks = torch.zeros(B, target_track_num, 2, device=world_points.device, dtype=torch.float32)
     final_vis_masks = torch.zeros(B, target_track_num, device=world_points.device, dtype=torch.bool)
     final_pos_masks = torch.zeros(target_track_num, device=world_points.device, dtype=torch.bool)
-
+    # Step 6. 先确定目标正样本数
     target_pos_track_num = target_track_num - int(target_track_num * neg_ratio)
     sampled_pos_track_num = 0
 
@@ -159,6 +239,13 @@ def build_tracks_by_depth(
     # Do not need to check the shape of final_tracks, as it is zeroed out
 
     # NOTE: We need to do some visual checks
+    _maybe_visualize_tracks(
+        images,
+        final_tracks,  # 前一部分是正样本轨迹，后一部分是负样本轨迹
+        final_vis_masks,
+        final_pos_masks,  # (P,)表示每条轨迹是不是正样本： True：正样本  False：负样本或空槽位
+        seq_name=seq_name,
+    )
 
     return final_tracks, final_vis_masks, final_pos_masks
 
@@ -167,7 +254,8 @@ def get_depth_inside_flag(depths, batch_indices, uv_int, proj_depths, rel_thres)
     sampled_depths = depths[batch_indices, uv_int[..., 1], uv_int[..., 0]]
     depth_diff = (proj_depths - sampled_depths).abs()
     depth_inside_flag = torch.logical_and(
-        depth_diff < (proj_depths * rel_thres), depth_diff < (sampled_depths * rel_thres)
+        depth_diff < (proj_depths * rel_thres),
+        depth_diff < (sampled_depths * rel_thres),
     )
     return depth_inside_flag
 
@@ -215,7 +303,9 @@ def track_epipolar_check(tracks, extrinsics, intrinsics, use_essential_mat=False
     if use_essential_mat:
         tracks_normalized = cam_from_img(tracks, intrinsics)
         sampson_distances = sampson_epipolar_distance(
-            tracks_normalized[0:1].expand(B - 1, -1, -1), tracks_normalized[1:], essential_mats
+            tracks_normalized[0:1].expand(B - 1, -1, -1),
+            tracks_normalized[1:],
+            essential_mats,
         )
     else:
         K1 = intrinsics[0:1].expand(B - 1, -1, -1)
@@ -361,7 +451,7 @@ def visualize_tracks_on_images(
     """
     import matplotlib
 
-    matplotlib.use('Agg')  # for non-interactive (optional)
+    matplotlib.use("Agg")  # for non-interactive (optional)
 
     os.makedirs(out_dir, exist_ok=True)
 

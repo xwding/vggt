@@ -1,0 +1,40 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "VGGT 训练 (torchrun)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "args": [
+                "--nproc_per_node=1",
+                "/mnt/data/data/qm/2_slam_net/2_vggt/vggt/training/launch.py"
+            ],
+            "python": "/home/dxw/miniconda3/envs/vggt/bin/python",
+            "cwd": "/mnt/data/data/qm/2_slam_net/2_vggt/vggt/training",
+            "console": "integratedTerminal",
+            "env": {
+                "HF_ENDPOINT": "https://hf-mirror.com",
+                "VGGT_TRACK_VIS": "1",
+                "VGGT_TRACK_VIS_DIR": "/mnt/data/data/qm/2_slam_net/2_vggt/vggt/training/logs/track_vis"
+            }
+        },
+        {
+            "name": "Debugpy: 当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--scene_dir",
+                "/mnt/data/data/qm/2_slam_net/2_vggt/vggt/examples/kitchen/",
+                "--checkout",
+                "/home/dxw/.cache/modelscope/hub/models/facebook/VGGT-1B/model.pt"
+            ]
+        },
+    ]
+}

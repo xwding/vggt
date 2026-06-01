@@ -98,19 +98,37 @@ def compute_camera_loss(
     weight_focal=0.5,  # weight for focal length loss
     **kwargs,
 ):
+    """
+    atch_data
+    训练数据字典，里面用到了：
+    point_masks：有效点 mask
+    extrinsics：真实相机外参
+    intrinsics：真实相机内参
+    images：图像张量，用来获取图像尺寸
+
+    gamma
+    多阶段损失权重衰减因子。
+
+    weight_trans / weight_rot / weight_focal
+    分别控制三种损失在总损失里的占比：
+    平移损失权重
+    旋转损失权重
+    焦距 / 视场角损失权重
+    """
+
     # List of predicted pose encodings per stage
-    pred_pose_encodings = pred_dict['pose_enc_list']
+    pred_pose_encodings = pred_dict["pose_enc_list"]
     # Binary mask for valid points per frame (B, N, H, W)
-    point_masks = batch_data['point_masks']
+    point_masks = batch_data["point_masks"]
     # Only consider frames with enough valid points (>100)
     valid_frame_mask = point_masks[:, 0].sum(dim=[-1, -2]) > 100
     # Number of prediction stages
     n_stages = len(pred_pose_encodings)
 
     # Get ground truth camera extrinsics and intrinsics
-    gt_extrinsics = batch_data['extrinsics']
-    gt_intrinsics = batch_data['intrinsics']
-    image_hw = batch_data['images'].shape[-2:]
+    gt_extrinsics = batch_data["extrinsics"]
+    gt_intrinsics = batch_data["intrinsics"]
+    image_hw = batch_data["images"].shape[-2:]
 
     # Encode ground truth pose to match predicted encoding format
     gt_pose_encoding = extri_intri_to_pose_encoding(
@@ -123,11 +141,14 @@ def compute_camera_loss(
     # Compute loss for each prediction stage with temporal weighting
     for stage_idx in range(n_stages):
         # Later stages get higher weight (gamma^0 = 1.0 for final stage)
+        # 最后一轮权重最大，越早的阶段权重越小。
         stage_weight = gamma ** (n_stages - stage_idx - 1)
         pred_pose_stage = pred_pose_encodings[stage_idx]
 
         if valid_frame_mask.sum() == 0:
             # If no valid frames, set losses to zero to avoid gradient issues
+            # 而不是直接写 0.0，是为了保留张量属性和梯度图兼容性。
+            # 这是训练代码里很常见的“安全零损失”写法。
             loss_T_stage = (pred_pose_stage * 0).mean()
             loss_R_stage = (pred_pose_stage * 0).mean()
             loss_FL_stage = (pred_pose_stage * 0).mean()
@@ -144,6 +165,7 @@ def compute_camera_loss(
         total_loss_FL += loss_FL_stage * stage_weight
 
     # Average over all stages
+    # 这里统一除以阶段数，让损失尺度更稳定，不会因为 stage 数量变多就整体变大。
     avg_loss_T = total_loss_T / n_stages
     avg_loss_R = total_loss_R / n_stages
     avg_loss_FL = total_loss_FL / n_stages
@@ -152,7 +174,12 @@ def compute_camera_loss(
     total_camera_loss = avg_loss_T * weight_trans + avg_loss_R * weight_rot + avg_loss_FL * weight_focal
 
     # Return loss dictionary with individual components
-    return {"loss_camera": total_camera_loss, "loss_T": avg_loss_T, "loss_R": avg_loss_R, "loss_FL": avg_loss_FL}
+    return {
+        "loss_camera": total_camera_loss,
+        "loss_T": avg_loss_T,
+        "loss_R": avg_loss_R,
+        "loss_FL": avg_loss_FL,
+    }
 
 
 def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
@@ -197,7 +224,15 @@ def camera_loss_single(pred_pose_enc, gt_pose_enc, loss_type="l1"):
     return loss_T, loss_R, loss_FL
 
 
-def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn=None, valid_range=-1, **kwargs):
+def compute_point_loss(
+    predictions,
+    batch,
+    gamma=1.0,
+    alpha=0.2,
+    gradient_loss_fn=None,
+    valid_range=-1,
+    **kwargs,
+):
     """
     Compute point loss.
 
@@ -209,10 +244,10 @@ def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
         gradient_loss_fn: Type of gradient loss to apply
         valid_range: Quantile range for outlier filtering
     """
-    pred_points = predictions['world_points']
-    pred_points_conf = predictions['world_points_conf']
-    gt_points = batch['world_points']
-    gt_points_mask = batch['point_masks']
+    pred_points = predictions["world_points"]
+    pred_points_conf = predictions["world_points_conf"]
+    gt_points = batch["world_points"]
+    gt_points_mask = batch["point_masks"]
 
     gt_points = check_and_fix_inf_nan(gt_points, "gt_points")
 
@@ -247,7 +282,15 @@ def compute_point_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
     return loss_dict
 
 
-def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_fn=None, valid_range=-1, **kwargs):
+def compute_depth_loss(
+    predictions,
+    batch,
+    gamma=1.0,
+    alpha=0.2,
+    gradient_loss_fn=None,
+    valid_range=-1,
+    **kwargs,
+):
     """
     Compute depth loss.
 
@@ -259,13 +302,13 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
         gradient_loss_fn: Type of gradient loss to apply
         valid_range: Quantile range for outlier filtering
     """
-    pred_depth = predictions['depth']
-    pred_depth_conf = predictions['depth_conf']
+    pred_depth = predictions["depth"]
+    pred_depth_conf = predictions["depth_conf"]
 
-    gt_depth = batch['depths']
+    gt_depth = batch["depths"]
     gt_depth = check_and_fix_inf_nan(gt_depth, "gt_depth")
     gt_depth = gt_depth[..., None]  # (B, H, W, 1)
-    gt_depth_mask = batch['point_masks'].clone()  # 3D points derived from depth map, so we use the same mask
+    gt_depth_mask = batch["point_masks"].clone()  # 3D points derived from depth map, so we use the same mask
 
     if gt_depth_mask.sum() < 100:
         # If there are less than 100 valid points, skip this batch
@@ -299,7 +342,16 @@ def compute_depth_loss(predictions, batch, gamma=1.0, alpha=0.2, gradient_loss_f
     return loss_dict
 
 
-def regression_loss(pred, gt, mask, conf=None, gradient_loss_fn=None, gamma=1.0, alpha=0.2, valid_range=-1):
+def regression_loss(
+    pred,
+    gt,
+    mask,
+    conf=None,
+    gradient_loss_fn=None,
+    gamma=1.0,
+    alpha=0.2,
+    valid_range=-1,
+):
     """
     Core regression loss function with confidence weighting and optional gradient loss.
 
@@ -547,8 +599,8 @@ def point_map_to_normal(point_map, mask, eps=1e-6):
     """
     with torch.cuda.amp.autocast(enabled=False):
         # Pad inputs to avoid boundary issues
-        padded_mask = F.pad(mask, (1, 1, 1, 1), mode='constant', value=0)
-        pts = F.pad(point_map.permute(0, 3, 1, 2), (1, 1, 1, 1), mode='constant', value=0).permute(0, 2, 3, 1)
+        padded_mask = F.pad(mask, (1, 1, 1, 1), mode="constant", value=0)
+        pts = F.pad(point_map.permute(0, 3, 1, 2), (1, 1, 1, 1), mode="constant", value=0).permute(0, 2, 3, 1)
 
         # Get neighboring points for each pixel
         center = pts[:, 1:-1, 1:-1, :]  # B,H,W,3

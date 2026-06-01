@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import trimesh
-import gradio as gr
 import numpy as np
 import matplotlib
 from scipy.spatial.transform import Rotation
@@ -104,7 +103,8 @@ def predictions_to_glb(
             if not os.path.exists("skyseg.onnx"):
                 print("Downloading skyseg.onnx...")
                 download_file_from_url(
-                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx", "skyseg.onnx"
+                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
+                    "skyseg.onnx",
                 )
 
             for i, image_name in enumerate(image_list):

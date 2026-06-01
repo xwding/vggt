@@ -33,6 +33,12 @@ def normalize_camera_extrinsics_and_points_batch(
     point_masks: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
+    1. 选第一台相机作为新的参考坐标系
+    2. 把所有相机和点云都变换到这个坐标系下
+    3. 再用点云到原点的平均距离做尺度归一化，使场景平均大小接近 1
+    """
+
+    """
     Normalize camera extrinsics and corresponding 3D points.
 
     This function transforms the coordinate system to be centered at the first camera
@@ -94,12 +100,16 @@ def normalize_camera_extrinsics_and_points_batch(
     if scale_by_points:
         new_cam_points = cam_points.clone()
         new_depths = depths.clone()
-
+        # 因为当前原点就是第一相机中心，所以它衡量的是“场景平均离第一相机有多远”。
         dist = new_world_points.norm(dim=-1)
         dist_sum = (dist * point_masks).sum(dim=[1, 2, 3])
         valid_count = point_masks.sum(dim=[1, 2, 3])
         avg_scale = (dist_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)
-
+        # 这样做的好处通常有：
+        # 不同样本的尺度更统一
+        # 训练更稳定
+        # 减少因为场景过大/过小带来的数值问题
+        # 深度、平移、点云处于更合适的数值范围
         new_world_points = new_world_points / avg_scale.view(-1, 1, 1, 1, 1)
         new_extrinsics[:, :, :3, 3] = new_extrinsics[:, :, :3, 3] / avg_scale.view(-1, 1, 1)
         if depths is not None:

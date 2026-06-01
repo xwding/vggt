@@ -49,13 +49,34 @@ class Attention(nn.Module):
 
     def forward(self, x: Tensor, pos=None) -> Tensor:
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv = (
+            self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        )  # (3, B, num_heads, N, head_dim)
         q, k, v = qkv.unbind(0)
+
+        # 为什么只归一化 q/k，不归一化 v？
+        # 因为 attention score 是由 q 和 k 的相似度决定的：
+
+        # score ij = q_i ⋅ k_j
+        # 如果 q/k 尺度太乱，score 会很不稳定：
+        # softmax 可能太尖锐
+        # 或者太平
+        # 所以给 q/k 做 norm，能让注意力权重更稳定。
         q, k = self.q_norm(q), self.k_norm(k)
 
         if self.rope is not None:
             q = self.rope(q, pos)
             k = self.rope(k, pos)
+
+        # x
+        # -> qkv(x): [B, N, 3C]
+        # -> reshape: [B, N, 3, H, Dh]
+        # -> permute: [3, B, H, N, Dh]
+        # -> q,k,v: [B, H, N, Dh]
+        # -> attention: [B, H, N, Dh]
+        # -> transpose/reshape: [B, N, C]
+        # -> proj: [B, N, C]
+        # -> proj_drop: [B, N, C]
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)

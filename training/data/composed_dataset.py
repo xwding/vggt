@@ -106,19 +106,21 @@ class ComposedDataset(Dataset, ABC):
 
         # --- Data Conversion and Preparation ---
         # Convert numpy arrays to tensors
-        images = torch.from_numpy(np.stack(batch["images"]).astype(np.float32)).contiguous()
+        images = torch.from_numpy(
+            np.stack(batch["images"]).astype(np.float32)
+        ).contiguous()  # (B, H, W, 3) in [0, 255], will be normalized to [0, 1] later
         # Normalize images from [0, 255] to [0, 1]
         images = images.permute(0, 3, 1, 2).to(torch.get_default_dtype()).div(255)
 
         # Convert other data to tensors with appropriate types
-        depths = torch.from_numpy(np.stack(batch["depths"]).astype(np.float32))
-        extrinsics = torch.from_numpy(np.stack(batch["extrinsics"]).astype(np.float32))
-        intrinsics = torch.from_numpy(np.stack(batch["intrinsics"]).astype(np.float32))
-        cam_points = torch.from_numpy(np.stack(batch["cam_points"]).astype(np.float32))
-        world_points = torch.from_numpy(np.stack(batch["world_points"]).astype(np.float32))
+        depths = torch.from_numpy(np.stack(batch["depths"]).astype(np.float32))  # (B,  H, W)
+        extrinsics = torch.from_numpy(np.stack(batch["extrinsics"]).astype(np.float32))  # (B,3,4)
+        intrinsics = torch.from_numpy(np.stack(batch["intrinsics"]).astype(np.float32))  # (B,3,3)
+        cam_points = torch.from_numpy(np.stack(batch["cam_points"]).astype(np.float32))  # (B, H, W, 3)
+        world_points = torch.from_numpy(np.stack(batch["world_points"]).astype(np.float32))  # (B, H, W, 3)
         point_masks = torch.from_numpy(
             np.stack(batch["point_masks"])
-        )  # Mask indicating valid depths / world points / cam points per frame
+        )  # Mask indicating valid depths / world points / cam points per frame (B, H, W)
         ids = torch.from_numpy(batch["ids"])  # Frame indices sampled from the original sequence
 
         # --- Apply Color Augmentation (training mode only) ---
@@ -146,32 +148,48 @@ class ComposedDataset(Dataset, ABC):
 
         # --- Track Processing (if enabled) ---
         if self.load_track:
-            if batch["tracks"] is not None:
+            # if batch["tracks"] is not None:
+            if "tracks" in batch and batch["tracks"] is not None:
                 # Use pre-computed tracks from the dataset
-                tracks = torch.from_numpy(np.stack(batch["tracks"]).astype(np.float32))
+                tracks = torch.from_numpy(
+                    np.stack(batch["tracks"]).astype(np.float32)
+                )  # (B,N,2) 帧数, 轨迹数, 2 (x,y)坐标
                 track_vis_mask = torch.from_numpy(np.stack(batch["track_masks"]).astype(bool))
 
                 # Sample a subset of tracks randomly
+                # 只有那些第一帧里能看到的轨迹点，才有资格被采样出来。
                 valid_indices = torch.where(track_vis_mask[0])[0]
                 if len(valid_indices) >= self.track_num:
                     # If we have enough tracks, sample without replacement
                     sampled_indices = valid_indices[torch.randperm(len(valid_indices))][: self.track_num]
                 else:
                     # If not enough tracks, sample with replacement (allow duplicates)
+                    # 比如：
+                    # 只有 20 条有效轨迹；
+                    # 但你想要 128 条；
+                    # 那就从这 20 条里面随机重复抽，直到凑够 128 条。
+                    # 这样做的目的是保证输出轨迹数量固定，方便后面 batch 训练。
                     sampled_indices = valid_indices[
                         torch.randint(
-                            0, len(valid_indices), (self.track_num,), dtype=torch.int64, device=valid_indices.device
+                            0,
+                            len(valid_indices),
+                            (self.track_num,),
+                            dtype=torch.int64,
+                            device=valid_indices.device,
                         )
                     ]
 
                 # Extract the sampled tracks and their masks
                 tracks = tracks[:, sampled_indices, :]
                 track_vis_mask = track_vis_mask[:, sampled_indices]
+                # 当前这些采样出来的轨迹，都被当作“正样本轨迹”；
                 track_positive_mask = torch.ones(track_vis_mask.shape[1]).bool()
 
             else:
                 # Generate tracks on-the-fly using depth information
                 # This creates synthetic tracks based on the 3D information available
+                #! 本质上， 3D点在每张图像上的投影位置，就是轨迹点在每张图像上的位置。所以依赖位姿的精度和3D点云坐标精度，还有内参精度
+                #! 可以理解为是特征点的匹配，完全基于几何关系来构造轨迹，
                 tracks, track_vis_mask, track_positive_mask = build_tracks_by_depth(
                     extrinsics,
                     intrinsics,
@@ -184,9 +202,9 @@ class ComposedDataset(Dataset, ABC):
                 )
 
             # Add track information to the sample dictionary
-            sample["tracks"] = tracks
-            sample["track_vis_mask"] = track_vis_mask
-            sample["track_positive_mask"] = track_positive_mask
+            sample["tracks"] = tracks  # 轨迹坐标
+            sample["track_vis_mask"] = track_vis_mask  # 轨迹在每一帧是否可见
+            sample["track_positive_mask"] = track_positive_mask  # 哪些轨迹是有效正样本
 
         return sample
 

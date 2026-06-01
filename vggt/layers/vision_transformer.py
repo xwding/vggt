@@ -16,22 +16,36 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.nn.init import trunc_normal_
-from . import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
+from . import (
+    Mlp,
+    PatchEmbed,
+    SwiGLUFFNFused,
+    MemEffAttention,
+    NestedTensorBlock as Block,
+)
 
 logger = logging.getLogger("dinov2")
 
 
+# 也就是把整个模型树从里到外扫一遍，对每个 nn.Linear 做统一初始化。
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
     if not depth_first and include_root:
         fn(module=module, name=name)
     for child_name, child_module in module.named_children():
         child_name = ".".join((name, child_name)) if name else child_name
-        named_apply(fn=fn, module=child_module, name=child_name, depth_first=depth_first, include_root=True)
+        named_apply(
+            fn=fn,
+            module=child_module,
+            name=child_name,
+            depth_first=depth_first,
+            include_root=True,
+        )
     if depth_first and include_root:
         fn(module=module, name=name)
     return module
 
 
+# 把很多层 block 分成若干组， 顺序执行每组， 这样就可以在每组内使用 FSDP 包裹了。
 class BlockChunk(nn.ModuleList):
     def forward(self, x):
         for b in self:
@@ -94,6 +108,7 @@ class DinoVisionTransformer(nn.Module):
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        # 这里的 1 指的是 cls token。
         self.num_tokens = 1
         self.n_blocks = depth
         self.num_heads = num_heads
@@ -103,21 +118,42 @@ class DinoVisionTransformer(nn.Module):
         self.interpolate_offset = interpolate_offset
         self.use_reentrant = False  # hardcoded to False
 
-        self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        # 基于卷积的patch embedding，把图像切成 patch 并映射到特征空间。
+        self.patch_embed = embed_layer(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+        )
         num_patches = self.patch_embed.num_patches
-
+        # 这是视觉 Transformer 经典的分类 token。
+        # 在所有 token 前面加一个“全局汇总位”，让模型把整张图的全局信息往这个 token 里聚合。
+        # 最后做分类时，通常直接取这个 token。
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # 这是位置编码，告诉模型每个 patch 在图像中的相对位置。
+        # 因为 Transformer 本身不理解空间顺序，所以必须显式加位置。
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
         assert num_register_tokens >= 0
+        # 这是 DINOv2 里比较有代表性的设计：register tokens。
+        # 它们不是分类 token，也不是 patch token，而是一些额外的可学习 token。
+        # 可以理解为模型内部的“缓存槽位”或者“工作记忆位”。
+        # 作用通常是：
+        # 帮助模型存储全局上下文
+        # 减轻 patch token 的负担
+        # 提升表示能力和训练稳定性
+        # 这几个 token 会插在 cls token 后面。
         self.register_tokens = (
             nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
         )
-
+        # 为每一层 block 生成随机深度（stochastic depth）的丢弃率。
         if drop_path_uniform is True:
+            # 每层同一个 drop rate
             dpr = [drop_path_rate] * depth
         else:
+            # 越深层 drop rate 越大
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
 
+        # Transformer block 里的 FFN 部分可以有不同实现：
         if ffn_layer == "mlp":
             logger.info("using MLP layer as FFN")
             ffn_layer = Mlp
@@ -134,6 +170,13 @@ class DinoVisionTransformer(nn.Module):
         else:
             raise NotImplementedError
 
+        # 这一步创建了 depth 个 Transformer block。
+        # 每个 block 通常内部包含：
+        # Multi-head self-attention
+        # FFN
+        # LayerNorm
+        # 残差连接
+        # 可选 LayerScale / qk_norm / drop_path
         blocks_list = [
             block_fn(
                 dim=embed_dim,
@@ -178,6 +221,12 @@ class DinoVisionTransformer(nn.Module):
         named_apply(init_weights_vit_timm, self)
 
     def interpolate_pos_encoding(self, x, w, h):
+        """
+        训练时位置编码是按固定输入尺寸学习的，比如 224x224。
+        但推理时可能输入另一种尺寸，比如 518x518。
+        此时 patch 数变了，原来的位置编码长度对不上，所以要插值。
+        """
+
         previous_dtype = x.dtype
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
@@ -186,6 +235,7 @@ class DinoVisionTransformer(nn.Module):
         pos_embed = self.pos_embed.float()
         class_pos_embed = pos_embed[:, 0]
         patch_pos_embed = pos_embed[:, 1:]
+        # 所以只对 patch 部分做插值，cls token 位置编码原样保留
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
@@ -213,15 +263,24 @@ class DinoVisionTransformer(nn.Module):
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
+
+        # (B, C, H, W) --> (B, N, C_embed)
         x = self.patch_embed(x)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-
+        # (B, 1 + N, C_embed)
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        # 现在每个 token 有了位置信息。
         x = x + self.interpolate_pos_encoding(x, w, h)
-
+        # [cls] + [registers] + [patches]
+        # token 0                 -> cls token
+        # token 1 ~ R             -> register tokens
+        # token R+1 ~ end         -> patch tokens
         if self.register_tokens is not None:
-            x = torch.cat((x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1)
+            x = torch.cat(
+                (x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]),
+                dim=1,
+            )
 
         return x
 
@@ -240,11 +299,11 @@ class DinoVisionTransformer(nn.Module):
             x_norm = self.norm(x)
             output.append(
                 {
-                    "x_norm_clstoken": x_norm[:, 0],
-                    "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
-                    "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
-                    "x_prenorm": x,
-                    "masks": masks,
+                    "x_norm_clstoken": x_norm[:, 0],  # 分类 token 特征
+                    "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],  # register token 特征
+                    "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],  # patch token 特征
+                    "x_prenorm": x,  # norm 前的完整 token 序列
+                    "masks": masks,  # 原 mask
                 }
             )
         return output
@@ -271,6 +330,16 @@ class DinoVisionTransformer(nn.Module):
         }
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
+        """
+        在视觉任务中很常见，比如：
+
+        检测
+        分割
+        深度估计
+        dense feature matching
+        因为很多任务不只依赖最终层，还依赖浅中层特征。
+        """
+        # 获取中间若干层的输出，而不是只拿最后一层。
         x = self.prepare_tokens_with_masks(x)
         # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
@@ -338,6 +407,10 @@ def init_weights_vit_timm(module: nn.Module, name: str = ""):
             nn.init.zeros_(module.bias)
 
 
+# !!预设了不同规模的超参数。
+# embed_dim = 384
+# depth = 12
+# num_heads = 6
 def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
@@ -352,6 +425,9 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
     return model
 
 
+# embed_dim = 768
+# depth = 12
+# num_heads = 12
 def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
@@ -366,6 +442,9 @@ def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
     return model
 
 
+# embed_dim = 1024
+# depth = 24
+# num_heads = 16
 def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
@@ -380,6 +459,9 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
     return model
 
 
+# embed_dim = 1536
+# depth = 40
+# num_heads = 24
 def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
     """
     Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64

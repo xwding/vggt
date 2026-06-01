@@ -5,8 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import os
+import sys
 from hydra import initialize, compose
 from omegaconf import DictConfig, OmegaConf
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from trainer import Trainer
 
 

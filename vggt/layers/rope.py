@@ -52,6 +52,8 @@ class PositionGetter:
         if (height, width) not in self.position_cache:
             y_coords = torch.arange(height, device=device)
             x_coords = torch.arange(width, device=device)
+            # [(0,0),(0,1),(0,2),(0,3),(1,0),(1,1),(1,2),(1,3),(2,0),(2,1),(2,2),(2,3)]
+            # 对于图像而言， 从上到下、从左到右扫描
             positions = torch.cartesian_prod(y_coords, x_coords)
             self.position_cache[height, width] = positions
 
@@ -131,7 +133,11 @@ class RotaryPositionEmbedding2D(nn.Module):
         return torch.cat((-x2, x1), dim=-1)
 
     def _apply_1d_rope(
-        self, tokens: torch.Tensor, positions: torch.Tensor, cos_comp: torch.Tensor, sin_comp: torch.Tensor
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+        cos_comp: torch.Tensor,
+        sin_comp: torch.Tensor,
     ) -> torch.Tensor:
         """Applies 1D rotary position embeddings along one dimension.
 

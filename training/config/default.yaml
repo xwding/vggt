@@ -3,15 +3,15 @@ defaults:
 
 exp_name: exp001
 img_size: 518
-num_workers: 8
+num_workers: 2
 seed_value: 42
-accum_steps: 2    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
+accum_steps: 1    # Keep this small for subset sanity-check training.
 patch_size: 14
-val_epoch_freq: 5
-max_img_per_gpu: 48
+val_epoch_freq: 1
+max_img_per_gpu: 8
 
-limit_train_batches: 800
-limit_val_batches: 400
+limit_train_batches: 10000000
+limit_val_batches: 10000000
 
 
 data:
@@ -21,6 +21,7 @@ data:
     num_workers: ${num_workers}
     max_img_per_gpu: ${max_img_per_gpu}
     common_config:
+      img_nums: [2, 8]
       img_size: ${img_size}
       patch_size: ${patch_size}
       debug: False
@@ -30,13 +31,15 @@ data:
       dataset_configs:
         - _target_: data.datasets.co3d.Co3dDataset
           split: train
-          CO3D_DIR: /YOUR/PATH/TO/CO3D
-          CO3D_ANNOTATION_DIR: /YOUR/PATH/TO/CO3D_ANNOTATION
+          CO3D_DIR: /mnt/data/data/qm/2_slam_net/2_vggt/data/cov3d_data/
+          CO3D_ANNOTATION_DIR: /mnt/data/data/qm/2_slam_net/2_vggt/data/co3d_anno/
+          min_num_images: 8
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}
     max_img_per_gpu: ${max_img_per_gpu}
     common_config:
+      img_nums: [2, 4]
       img_size: ${img_size}
       patch_size: ${patch_size}
       debug: False
@@ -45,17 +48,26 @@ data:
       dataset_configs:
         - _target_: data.datasets.co3d.Co3dDataset
           split: test
-          CO3D_DIR: /YOUR/PATH/TO/CO3D
-          CO3D_ANNOTATION_DIR: /YOUR/PATH/TO/CO3D_ANNOTATION
+          CO3D_DIR: /mnt/data/data/qm/2_slam_net/2_vggt/data/cov3d_data/
+          CO3D_ANNOTATION_DIR: /mnt/data/data/qm/2_slam_net/2_vggt/data/co3d_anno/
+          min_num_images: 4
 
 
 logging:
   log_dir: logs
-  log_visuals: False
+  log_visuals: True
   log_freq: 1
   log_level_primary: DEBUG
   log_level_secondary: WARNING
   all_ranks: False
+  log_visual_frequency:
+    train: 100
+    val: 20
+  visual_batch_index: 0
+  visual_max_frames: 4
+  visual_include_rgb: True
+  visual_include_depth: True
+  visual_include_pose: True
   tensorboard_writer:
     _target_: train_utils.tb_writer.TensorBoardLogger
     path: ${logging.log_dir}/tensorboard
@@ -86,7 +98,10 @@ logging:
 checkpoint:
   save_dir: logs/${exp_name}/ckpts
   save_freq: 5
-  resume_checkpoint_path: /YOUR/PATH/TO/CKPT
+  resume_checkpoint_path: /home/dxw/.cache/modelscope/hub/models/facebook/VGGT-1B/model.pt
+  load_only_model_prefixes:
+    - "aggregator.patch_embed."
+  resume_training_state: False
   strict: False
 
 
@@ -119,7 +134,7 @@ optim:
     weight_decay: 0.05
 
   frozen_module_names:
-      - "*aggregator*"  # example, freeze the aggregator
+      - "*aggregator.patch_embed*"  # freeze only the DINOv2 image encoder
 
   amp:
     enabled: True
@@ -157,7 +172,7 @@ optim:
 
 
 
-max_epochs: 20
+max_epochs: 10
 
 model:
   _target_: vggt.models.vggt.VGGT
