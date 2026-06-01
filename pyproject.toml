@@ -58,8 +58,3 @@ skip-string-normalization = true
 
 [tool.pixi.tasks]
 
-
-[tool.black]
-line-length = 120
-target-version = ["py310"]
-skip-string-normalization = true
